@@ -5,6 +5,7 @@ import com.example.jobs.domain.JobAttemptEntity;
 import com.example.jobs.domain.JobEntity;
 import com.example.jobs.domain.JobStatus;
 import com.example.jobs.exception.JobNotFoundException;
+import com.example.jobs.exception.RequestValidationException;
 import com.example.jobs.outbox.OutboxRelayScheduler;
 import com.example.jobs.repository.DeadLetterRecordRepository;
 import com.example.jobs.repository.JobAttemptRepository;
@@ -14,6 +15,7 @@ import com.example.jobs.web.dto.CreateJobRequest;
 import com.example.jobs.web.dto.DeadLetterJobResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
 import com.example.jobs.web.dto.JobStatusResponse;
+import com.example.jobs.worker.JobHandlerRegistry;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,6 +41,7 @@ public class JobService {
     private final OutboxRelayScheduler outboxRelayScheduler;
     private final IdempotencyCache idempotencyCache;
     private final IdempotencyKeyResolver keyResolver;
+    private final JobHandlerRegistry jobHandlerRegistry;
     private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper;
 
@@ -50,6 +53,7 @@ public class JobService {
             OutboxRelayScheduler outboxRelayScheduler,
             IdempotencyCache idempotencyCache,
             IdempotencyKeyResolver keyResolver,
+            JobHandlerRegistry jobHandlerRegistry,
             MeterRegistry meterRegistry,
             ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
@@ -59,6 +63,7 @@ public class JobService {
         this.outboxRelayScheduler = outboxRelayScheduler;
         this.idempotencyCache = idempotencyCache;
         this.keyResolver = keyResolver;
+        this.jobHandlerRegistry = jobHandlerRegistry;
         this.meterRegistry = meterRegistry;
         this.objectMapper = objectMapper;
     }
@@ -150,11 +155,9 @@ public class JobService {
     }
 
     private void validateSubmission(CreateJobRequest request) {
-        if (request.payload() == null || !request.payload().isObject()) {
-            throw new IllegalArgumentException("payload must be a JSON object");
-        }
+        jobHandlerRegistry.validate("", request.jobType(), request.payload());
         if (request.scheduledAt() != null && request.delayMs() != null && request.delayMs() > 0) {
-            throw new IllegalArgumentException("Provide at most one of scheduledAt or delayMs");
+            throw new RequestValidationException("delayMs", "Provide at most one of scheduledAt or delayMs");
         }
     }
 

@@ -13,7 +13,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
@@ -25,8 +24,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -42,7 +39,7 @@ public class JobExecutionEngine {
     private static final TypeReference<Map<String, String>> METADATA_TYPE = new TypeReference<>() {};
 
     private final WorkerStateTxService workerStateTxService;
-    private final Map<String, JobHandler> handlerRegistry;
+    private final JobHandlerRegistry handlerRegistry;
     private final ExecutorService jobAttemptExecutor;
     private final ScheduledExecutorService leaseHeartbeatScheduler;
     private final JobPipelineProperties properties;
@@ -51,14 +48,13 @@ public class JobExecutionEngine {
 
     public JobExecutionEngine(
             WorkerStateTxService workerStateTxService,
-            List<JobHandler> handlers,
+            JobHandlerRegistry handlerRegistry,
             ExecutorService jobAttemptExecutor,
             JobPipelineProperties properties,
             MeterRegistry meterRegistry,
             ObjectMapper objectMapper) {
         this.workerStateTxService = workerStateTxService;
-        this.handlerRegistry = handlers.stream()
-                .collect(Collectors.toMap(JobHandler::jobType, Function.identity()));
+        this.handlerRegistry = handlerRegistry;
         this.jobAttemptExecutor = jobAttemptExecutor;
         this.properties = properties;
         this.meterRegistry = meterRegistry;
@@ -137,10 +133,9 @@ public class JobExecutionEngine {
     private JsonNode executeAttempt(JobExecutionContext context) throws Exception {
         applySimulationDirectives(context);
 
-        JobHandler handler = handlerRegistry.get(context.jobType());
-        if (handler == null) {
-            throw new UnsupportedJobTypeException(context.jobType());
-        }
+        // Submissions are validated, but a node missing a handler during a rolling deploy still fails safely.
+        JobHandler handler = handlerRegistry.find(context.jobType())
+                .orElseThrow(() -> new UnsupportedJobTypeException(context.jobType()));
         return handler.execute(context);
     }
 

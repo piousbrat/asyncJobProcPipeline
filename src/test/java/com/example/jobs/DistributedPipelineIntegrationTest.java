@@ -13,6 +13,7 @@ import com.example.jobs.messaging.JobDispatchEnvelope;
 import com.example.jobs.outbox.OutboxTxService;
 import com.example.jobs.repository.JobRepository;
 import com.example.jobs.repository.OutboxEventRepository;
+import com.example.jobs.web.dto.ApiErrorResponse;
 import com.example.jobs.web.dto.DeadLetterJobResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
 import com.example.jobs.web.dto.JobStatusResponse;
@@ -192,6 +193,51 @@ class DistributedPipelineIntegrationTest {
         ResponseEntity<String> conflictingSchedule = postRaw(
                 "{\"jobType\":\"echo\",\"scheduledAt\":\"2030-01-01T00:00:00Z\",\"delayMs\":1000,\"payload\":{\"message\":\"hi\"}}");
         assertThat(conflictingSchedule.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(conflictingSchedule.getBody()).contains("\"delayMs\":\"Provide at most one of scheduledAt or delayMs\"");
+
+        // Unknown jobType -> 400 validation failure at the API; nothing is persisted or executed
+        long jobsBefore = jobRepository.count();
+        ResponseEntity<ApiErrorResponse> unknownType = restTemplate.postForEntity("/api/v1/jobs",
+                Map.of("jobType", "invoice.sendd", "payload", Map.of("id", 1)), ApiErrorResponse.class);
+        assertThat(unknownType.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(unknownType.getBody().message()).isEqualTo("Validation failed");
+        assertThat(unknownType.getBody().fieldErrors().get("jobType"))
+                .startsWith("Unsupported jobType 'invoice.sendd'; supported types: ")
+                .contains("echo", "report.generate", "simulate", "sum");
+        assertThat(jobRepository.count()).isEqualTo(jobsBefore);
+
+        // Payloads the handler would refuse -> 400 with one field error per problem; nothing is persisted
+        ResponseEntity<ApiErrorResponse> echoWithoutMessage = restTemplate.postForEntity("/api/v1/jobs",
+                Map.of("jobType", "echo", "payload", Map.of("msg", "typo")), ApiErrorResponse.class);
+        assertThat(echoWithoutMessage.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(echoWithoutMessage.getBody().message()).isEqualTo("Validation failed");
+        assertThat(echoWithoutMessage.getBody().fieldErrors())
+                .containsExactly(Map.entry("payload.message", "must be a non-blank string"));
+
+        ResponseEntity<ApiErrorResponse> badSum = restTemplate.postForEntity("/api/v1/jobs",
+                Map.of("jobType", "sum", "payload", Map.of("numbers", List.of(1, "two", 3, true))),
+                ApiErrorResponse.class);
+        assertThat(badSum.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(badSum.getBody().fieldErrors()).containsOnly(
+                Map.entry("payload.numbers[1]", "must be a number, got: \"two\""),
+                Map.entry("payload.numbers[3]", "must be a number, got: true"));
+
+        ResponseEntity<ApiErrorResponse> badReport = restTemplate.postForEntity("/api/v1/jobs",
+                Map.of("jobType", "report.generate", "payload", Map.of("rows", -5, "simulateFailures", "lots")),
+                ApiErrorResponse.class);
+        assertThat(badReport.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(badReport.getBody().fieldErrors()).containsOnly(
+                Map.entry("payload.reportName", "must be a non-blank string"),
+                Map.entry("payload.rows", "must be a non-negative integer"),
+                Map.entry("payload.simulateFailures", "must be a non-negative integer"));
+
+        ResponseEntity<String> arrayPayloadBody = postRaw("{\"jobType\":\"echo\",\"payload\":[1]}");
+        assertThat(arrayPayloadBody.getBody()).contains("\"payload\":\"payload must be a JSON object\"");
+        assertThat(jobRepository.count()).isEqualTo(jobsBefore);
+
+        // Surrounding whitespace is tolerated, as the stored jobType is trimmed
+        assertThat(postRaw("{\"jobType\":\" echo \",\"payload\":{\"message\":\"trim-" + UUID.randomUUID() + "\"}}")
+                .getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
     }
 
     @Test
@@ -397,12 +443,13 @@ class DistributedPipelineIntegrationTest {
 
     @Test
     void nonRetryableFailureBypassesRetriesRoutesImmediatelyToDlqAndSupportsReplay() {
-        // Non-retryable payload error with maxRetries=5 must fail on attempt 1 with zero retries
+        // Non-retryable payload error with maxRetries=5 must fail on attempt 1 with zero retries. Submission rejects
+        // payloads a handler can detect up front, so this one only fails at execution.
         ResponseEntity<JobAcceptedResponse> badJobResp = postJob(Map.of(
                 "jobType", "sum",
                 "priority", "HIGH",
                 "maxRetries", 5,
-                "payload", Map.of("numbers", List.of("not-a-number"))));
+                "payload", Map.of("numbers", List.of(1, 2), "simulateInvalid", true)));
         String badJobId = badJobResp.getBody().jobId();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {

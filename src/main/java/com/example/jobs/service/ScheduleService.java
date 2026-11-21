@@ -8,6 +8,7 @@ import com.example.jobs.repository.JobScheduleRepository;
 import com.example.jobs.web.dto.CreateJobRequest;
 import com.example.jobs.web.dto.CreateScheduleRequest;
 import com.example.jobs.web.dto.ScheduleResponse;
+import com.example.jobs.worker.JobHandlerRegistry;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.DateTimeException;
@@ -33,23 +34,24 @@ public class ScheduleService {
 
     private final JobScheduleRepository scheduleRepository;
     private final JobWriteTxService jobWriteTxService;
+    private final JobHandlerRegistry jobHandlerRegistry;
     private final ObjectMapper objectMapper;
 
     public ScheduleService(
             JobScheduleRepository scheduleRepository,
             JobWriteTxService jobWriteTxService,
+            JobHandlerRegistry jobHandlerRegistry,
             ObjectMapper objectMapper) {
         this.scheduleRepository = scheduleRepository;
         this.jobWriteTxService = jobWriteTxService;
+        this.jobHandlerRegistry = jobHandlerRegistry;
         this.objectMapper = objectMapper;
     }
 
     @Transactional
     public ScheduleResponse create(CreateScheduleRequest request) {
         CreateJobRequest job = request.job();
-        if (job.payload() == null || !job.payload().isObject()) {
-            throw new IllegalArgumentException("job.payload must be a JSON object");
-        }
+        jobHandlerRegistry.validate("job.", job.jobType(), job.payload());
         if (job.scheduledAt() != null || job.delayMs() != null || job.idempotencyKey() != null) {
             throw new IllegalArgumentException("scheduledAt, delayMs and idempotencyKey are not allowed in a schedule's job");
         }

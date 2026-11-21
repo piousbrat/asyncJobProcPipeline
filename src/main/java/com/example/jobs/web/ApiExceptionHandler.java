@@ -2,6 +2,7 @@ package com.example.jobs.web;
 
 import com.example.jobs.exception.JobNotFoundException;
 import com.example.jobs.exception.JobStateConflictException;
+import com.example.jobs.exception.RequestValidationException;
 import com.example.jobs.exception.ScheduleNotFoundException;
 import com.example.jobs.web.dto.ApiErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
@@ -29,6 +30,13 @@ public class ApiExceptionHandler {
             fieldErrors.putIfAbsent(fieldError.getField(), fieldError.getDefaultMessage());
         }
         return buildError(HttpStatus.BAD_REQUEST, "Validation failed", request.getRequestURI(), fieldErrors);
+    }
+
+    @ExceptionHandler(RequestValidationException.class)
+    public ResponseEntity<ApiErrorResponse> handleRequestValidation(
+            RequestValidationException ex,
+            HttpServletRequest request) {
+        return buildError(HttpStatus.BAD_REQUEST, "Validation failed", request.getRequestURI(), ex.fieldErrors());
     }
 
     @ExceptionHandler({IllegalArgumentException.class, HttpMessageNotReadableException.class,
