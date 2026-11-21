@@ -93,6 +93,61 @@ class IdempotencyAndRateLimitIntegrationTest {
     }
 
     @Test
+    void clientSuppliedJobIdIsTheJobIdAndDeduplicatesAcrossClientsInRedisAndTheDatabase() {
+        String jobId = "order-" + UUID.randomUUID();
+        Map<String, Object> body = job(null);
+        body.put("jobId", jobId);
+
+        ResponseEntity<JobAcceptedResponse> first = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(body, headers(newClient())), JobAcceptedResponse.class);
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(first.getBody().jobId()).isEqualTo(jobId);
+        assertThat(first.getBody().deduplicated()).isFalse();
+        assertThat(first.getHeaders().getLocation()).hasPath("/api/v1/jobs/" + jobId);
+        assertThat(restTemplate.getForEntity("/api/v1/jobs/" + jobId, String.class).getStatusCode())
+                .isEqualTo(HttpStatus.OK);
+
+        // Same id from another client with a different body: still the original job, answered from Redis
+        body.put("payload", Map.of("message", "changed"));
+        JobAcceptedResponse fromRedis = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(body, headers(newClient())), JobAcceptedResponse.class).getBody();
+        assertThat(fromRedis.jobId()).isEqualTo(jobId);
+        assertThat(fromRedis.deduplicated()).isTrue();
+
+        // Redis lost the key: the primary key catches the repeat
+        redis.delete("jobs:idem:job:" + jobId);
+        JobAcceptedResponse fromDatabase = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(body, headers(newClient())), JobAcceptedResponse.class).getBody();
+        assertThat(fromDatabase.jobId()).isEqualTo(jobId);
+        assertThat(fromDatabase.deduplicated()).isTrue();
+        assertThat(jobRepository.findById(jobId)).get()
+                .extracting(j -> j.getPayloadJson()).asString().contains("\"hi\"");
+    }
+
+    @Test
+    void jobIdThatCollidesWithAGeneratedIdReturnsThatJobInsteadOfFailing() {
+        JobAcceptedResponse generated = submit(newClient(), null).getBody();
+        Map<String, Object> body = job(null);
+        body.put("jobId", generated.jobId());
+
+        ResponseEntity<JobAcceptedResponse> clash = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(body, headers(newClient())), JobAcceptedResponse.class);
+        assertThat(clash.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(clash.getBody().jobId()).isEqualTo(generated.jobId());
+        assertThat(clash.getBody().deduplicated()).isTrue();
+    }
+
+    @Test
+    void invalidJobIdIsRejected() {
+        Map<String, Object> body = job(null);
+        body.put("jobId", "has spaces/and slashes");
+        ResponseEntity<String> response = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(body, headers(newClient())), String.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(response.getBody()).contains("\"jobId\":\"jobId must be 1-64 characters");
+    }
+
+    @Test
     void requestStillInFlightOnAnotherNodeGets409UntilItFinishes() {
         String client = newClient();
         String key = "idem-" + UUID.randomUUID();

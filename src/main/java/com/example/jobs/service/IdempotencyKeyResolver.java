@@ -15,6 +15,8 @@ import org.springframework.stereotype.Component;
 /**
  * Every submission gets an idempotency key, in order of preference:
  * <ol>
+ *   <li>{@code JOB_ID}: {@code job:<jobId>} when the client names the job. The id is globally unique (it is the
+ *       primary key), so a repeat returns that job whichever client sent it.</li>
  *   <li>{@code EXPLICIT}: the client's {@code idempotencyKey}, used as-is and kept for {@code ttl-ms} in Redis.</li>
  *   <li>{@code EVENT}: {@code evt:sha256(client, X-Event-Id)}. An upstream event id is a stable identity, so it
  *       deduplicates like an explicit key.</li>
@@ -27,7 +29,7 @@ import org.springframework.stereotype.Component;
 @Component
 public class IdempotencyKeyResolver {
 
-    public enum Source { EXPLICIT, EVENT, FINGERPRINT }
+    public enum Source { JOB_ID, EXPLICIT, EVENT, FINGERPRINT }
 
     /** {@code cacheKey} is used in Redis, {@code dbKey} is stored in {@code jobs.idempotency_key}. */
     public record ResolvedKey(String cacheKey, String dbKey, long cacheTtlMs, Source source) {
@@ -41,8 +43,12 @@ public class IdempotencyKeyResolver {
         this.config = properties.idempotency();
     }
 
-    /** Returns null only when no explicit key or event id was given and fingerprinting is disabled (window 0). */
+    /** Returns null only when no job id, explicit key or event id was given and fingerprinting is disabled (window 0). */
     public ResolvedKey resolve(CreateJobRequest request, String clientId, String eventId, Instant now) {
+        if (request.jobId() != null) {
+            String key = "job:" + request.jobId();
+            return new ResolvedKey(key, key, config.ttlMs(), Source.JOB_ID);
+        }
         String explicit = trimToNull(request.idempotencyKey());
         if (explicit != null) {
             return new ResolvedKey(explicit, explicit, config.ttlMs(), Source.EXPLICIT);

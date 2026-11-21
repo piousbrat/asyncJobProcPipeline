@@ -5,17 +5,21 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import jakarta.persistence.Version;
 import java.time.Instant;
 import lombok.Getter;
 import lombok.Setter;
+import org.springframework.data.domain.Persistable;
 
 @Entity
 @Getter
 @Setter
 @Table(name = "jobs")
-public class JobEntity {
+public class JobEntity implements Persistable<String> {
 
     @Id
     @Column(name = "id", length = 64, nullable = false, updatable = false)
@@ -95,4 +99,24 @@ public class JobEntity {
     @Version
     @Column(name = "version", nullable = false)
     private long version;
+
+    /**
+     * Ids can be client-chosen, so "id is set" doesn't mean "row exists". Without this, saving a new job whose id is
+     * taken would merge into (overwrite) the existing row instead of failing on the primary key.
+     */
+    @Transient
+    @Getter(lombok.AccessLevel.NONE)
+    @Setter(lombok.AccessLevel.NONE)
+    private boolean newEntity = true;
+
+    @Override
+    public boolean isNew() {
+        return newEntity;
+    }
+
+    @PostLoad
+    @PostPersist
+    void markPersisted() {
+        newEntity = false;
+    }
 }

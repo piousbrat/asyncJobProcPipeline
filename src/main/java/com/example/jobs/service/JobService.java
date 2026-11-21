@@ -92,6 +92,9 @@ public class JobService {
         } catch (DataIntegrityViolationException ex) {
             // Redis lost the key (eviction, failover, outage): the DB constraint is the source of truth.
             Optional<JobEntity> winner = dbKey != null ? jobRepository.findByIdempotencyKey(dbKey) : Optional.empty();
+            if (winner.isEmpty() && request.jobId() != null) {
+                winner = jobRepository.findById(request.jobId());
+            }
             if (winner.isEmpty()) {
                 releaseClaim(key, claimToken);
                 throw ex;

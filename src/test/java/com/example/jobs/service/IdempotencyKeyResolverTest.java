@@ -19,6 +19,16 @@ class IdempotencyKeyResolverTest {
     private final Instant now = Instant.parse("2026-11-21T08:00:30Z");
 
     @Test
+    void jobIdWinsOverEveryOtherKeyAndIsTheSameForEveryClient() throws Exception {
+        String json = "{\"jobId\":\"order-42\",\"jobType\":\"echo\",\"payload\":{},\"idempotencyKey\":\"k1\"}";
+        ResolvedKey a = resolver.resolve(request(json), "client:a", "evt-1", now);
+        ResolvedKey b = resolver.resolve(request(json.replace("{}", "{\"v\":2}")), "client:b", null, now);
+
+        assertThat(a).isEqualTo(new ResolvedKey("job:order-42", "job:order-42", 86_400_000, Source.JOB_ID));
+        assertThat(b).isEqualTo(a);
+    }
+
+    @Test
     void explicitKeyWinsOverEventIdAndFingerprint() throws Exception {
         ResolvedKey key = resolver.resolve(request("{\"jobType\":\"echo\",\"payload\":{},\"idempotencyKey\":\" k1 \"}"),
                 "client:a", "evt-1", now);
