@@ -16,7 +16,9 @@ public record JobPipelineProperties(
         @DefaultValue @Valid Consumer consumer,
         @DefaultValue @Valid Outbox outbox,
         @DefaultValue @Valid Worker worker,
-        @DefaultValue @Valid Schedules schedules) {
+        @DefaultValue @Valid Schedules schedules,
+        @DefaultValue @Valid Idempotency idempotency,
+        @DefaultValue @Valid RateLimit rateLimit) {
 
     public record Defaults(@DefaultValue("10000") @Min(10) long timeoutMs) {
     }
@@ -66,5 +68,17 @@ public record JobPipelineProperties(
     public record Schedules(
             @DefaultValue("1000") @Min(50) long pollIntervalMs,
             @DefaultValue("100") @Min(1) int batchSize) {
+    }
+
+    public record Idempotency(
+            @DefaultValue("86400000") @Min(1000) long ttlMs,
+            @DefaultValue("30000") @Min(100) long pendingTtlMs,
+            @DefaultValue("2000") @Min(0) long awaitMs) {
+    }
+
+    public record RateLimit(
+            @DefaultValue("true") boolean enabled,
+            @DefaultValue("10") @Min(1) int limit,
+            @DefaultValue("3000") @Min(1) long windowMs) {
     }
 }
