@@ -344,6 +344,19 @@ SERVER_PORT=8081 WORKER_ID=worker-node-2 mvn spring-boot:run
 
 ## Built-in Pluggable Job Handlers & Simulation Flags
 
+`POST /api/v1/jobs` and `POST /api/v1/schedules` only accept a `jobType` that has a registered `JobHandler` bean.
+Anything else is rejected before anything is stored:
+
+```json
+HTTP/1.1 400
+{ "status": 400, "error": "Bad Request", "message": "Validation failed", "path": "/api/v1/jobs",
+  "fieldErrors": { "jobType": "Unsupported jobType 'invoice.sendd'; supported types: echo, report.generate, simulate, sum" } }
+```
+
+Every node must therefore ship the same handlers: deploy a new handler everywhere before clients submit its type. If a
+node without the handler still receives such a job mid-rollout, it fails safely as non-retryable
+(`UnsupportedJobTypeException`, sent to the DLQ).
+
 | `jobType` | Expected `payload` | Sample `result` JSON |
 | --- | --- | --- |
 | `echo` | `{"message": "hello"}` | `{"echo":"hello","attempt":1,"priority":"NORMAL","processedBy":"..."}` |

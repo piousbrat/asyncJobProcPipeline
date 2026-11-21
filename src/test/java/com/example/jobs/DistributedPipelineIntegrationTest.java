@@ -13,6 +13,7 @@ import com.example.jobs.messaging.JobDispatchEnvelope;
 import com.example.jobs.outbox.OutboxTxService;
 import com.example.jobs.repository.JobRepository;
 import com.example.jobs.repository.OutboxEventRepository;
+import com.example.jobs.web.dto.ApiErrorResponse;
 import com.example.jobs.web.dto.DeadLetterJobResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
 import com.example.jobs.web.dto.JobStatusResponse;
@@ -192,6 +193,22 @@ class DistributedPipelineIntegrationTest {
         ResponseEntity<String> conflictingSchedule = postRaw(
                 "{\"jobType\":\"echo\",\"scheduledAt\":\"2030-01-01T00:00:00Z\",\"delayMs\":1000,\"payload\":{\"message\":\"hi\"}}");
         assertThat(conflictingSchedule.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(conflictingSchedule.getBody()).contains("\"delayMs\":\"Provide at most one of scheduledAt or delayMs\"");
+
+        // Unknown jobType -> 400 validation failure at the API; nothing is persisted or executed
+        long jobsBefore = jobRepository.count();
+        ResponseEntity<ApiErrorResponse> unknownType = restTemplate.postForEntity("/api/v1/jobs",
+                Map.of("jobType", "invoice.sendd", "payload", Map.of("id", 1)), ApiErrorResponse.class);
+        assertThat(unknownType.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(unknownType.getBody().message()).isEqualTo("Validation failed");
+        assertThat(unknownType.getBody().fieldErrors().get("jobType"))
+                .startsWith("Unsupported jobType 'invoice.sendd'; supported types: ")
+                .contains("echo", "report.generate", "simulate", "sum");
+        assertThat(jobRepository.count()).isEqualTo(jobsBefore);
+
+        // Surrounding whitespace is tolerated, as the stored jobType is trimmed
+        assertThat(postRaw("{\"jobType\":\" echo \",\"payload\":{\"message\":\"trim-" + UUID.randomUUID() + "\"}}")
+                .getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
     }
 
     @Test
