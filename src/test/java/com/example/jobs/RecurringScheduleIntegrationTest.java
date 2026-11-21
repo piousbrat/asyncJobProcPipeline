@@ -151,7 +151,7 @@ class RecurringScheduleIntegrationTest {
         assertThat(create(schedule("0 0 * * * *", "Mars/Olympus", echoJob())).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(create(schedule("0 0 * * * *", null,
-                Map.of("jobType", "echo", "payload", Map.of(), "delayMs", 1000))).getStatusCode())
+                Map.of("jobType", "echo", "payload", Map.of("message", "hi"), "delayMs", 1000))).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(create(schedule("0 0 * * * *", null, Map.of("jobType", "echo"))).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
@@ -159,6 +159,11 @@ class RecurringScheduleIntegrationTest {
                 schedule("0 0 * * * *", null, Map.of("jobType", "nope", "payload", Map.of())), String.class);
         assertThat(unknownType.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(unknownType.getBody()).contains("\"job.jobType\":\"Unsupported jobType 'nope'");
+        ResponseEntity<String> badPayload = restTemplate.postForEntity("/api/v1/schedules",
+                schedule("0 0 * * * *", null, Map.of("jobType", "echo", "payload", Map.of("message", " "))),
+                String.class);
+        assertThat(badPayload.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(badPayload.getBody()).contains("\"job.payload.message\":\"must be a non-blank string\"");
 
         Map<String, Object> duplicate = schedule("0 0 * * * *", null, echoJob());
         duplicate.put("name", unix.name());

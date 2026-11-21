@@ -155,10 +155,7 @@ public class JobService {
     }
 
     private void validateSubmission(CreateJobRequest request) {
-        jobHandlerRegistry.requireSupported("jobType", request.jobType());
-        if (request.payload() == null || !request.payload().isObject()) {
-            throw new RequestValidationException("payload", "payload must be a JSON object");
-        }
+        jobHandlerRegistry.validate("", request.jobType(), request.payload());
         if (request.scheduledAt() != null && request.delayMs() != null && request.delayMs() > 0) {
             throw new RequestValidationException("delayMs", "Provide at most one of scheduledAt or delayMs");
         }
