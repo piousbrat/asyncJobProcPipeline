@@ -34,10 +34,10 @@ public class OutboxTxService {
         if (locked.isEmpty()) {
             return List.of();
         }
-        Instant lockExpiresAt = now.plusMillis(properties.getOutbox().getLockDurationMs());
+        Instant lockExpiresAt = now.plusMillis(properties.outbox().lockDurationMs());
         for (OutboxEventEntity event : locked) {
             event.setStatus(OutboxStatus.PROCESSING);
-            event.setLockedBy(properties.getWorkerId());
+            event.setLockedBy(properties.workerId());
             event.setLockExpiresAt(lockExpiresAt);
             event.setPublishAttempts(event.getPublishAttempts() + 1);
         }

@@ -59,7 +59,7 @@ public class OutboxRelayScheduler {
     }
 
     public void triggerImmediateFlush() {
-        if (!properties.getOutbox().isEnabled()) {
+        if (!properties.outbox().enabled()) {
             return;
         }
         if (flushQueued.compareAndSet(false, true)) {
@@ -75,7 +75,7 @@ public class OutboxRelayScheduler {
 
     @Scheduled(fixedDelayString = "${app.jobs.outbox.poll-interval-ms:200}")
     public void scheduledRelay() {
-        if (!properties.getOutbox().isEnabled()) {
+        if (!properties.outbox().enabled()) {
             return;
         }
         relayDueEvents();
@@ -83,7 +83,7 @@ public class OutboxRelayScheduler {
 
     public int relayDueEvents() {
         int totalPublished = 0;
-        int batchSize = properties.getOutbox().getBatchSize();
+        int batchSize = properties.outbox().batchSize();
 
         while (true) {
             List<OutboxEventEntity> batch = outboxTxService.claimDueBatch(Instant.now(), batchSize);
@@ -116,7 +116,7 @@ public class OutboxRelayScheduler {
             }
 
             kafkaTemplate.send(record)
-                    .get(properties.getOutbox().getSendTimeoutMs(), TimeUnit.MILLISECONDS);
+                    .get(properties.outbox().sendTimeoutMs(), TimeUnit.MILLISECONDS);
 
             outboxTxService.markPublished(event.getId(), event.getJobId(), event.getEventType(), Instant.now());
             return true;

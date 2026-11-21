@@ -24,33 +24,33 @@ public class KafkaPipelineConfig {
 
     @Bean
     public NewTopic highPriorityTopic(JobPipelineProperties props) {
-        return TopicBuilder.name(props.getTopics().getHigh())
-                .partitions(props.getTopics().getPartitions().getHigh())
-                .replicas(props.getTopics().getReplicationFactor())
+        return TopicBuilder.name(props.topics().high())
+                .partitions(props.topics().partitions().high())
+                .replicas(props.topics().replicationFactor())
                 .build();
     }
 
     @Bean
     public NewTopic normalPriorityTopic(JobPipelineProperties props) {
-        return TopicBuilder.name(props.getTopics().getNormal())
-                .partitions(props.getTopics().getPartitions().getNormal())
-                .replicas(props.getTopics().getReplicationFactor())
+        return TopicBuilder.name(props.topics().normal())
+                .partitions(props.topics().partitions().normal())
+                .replicas(props.topics().replicationFactor())
                 .build();
     }
 
     @Bean
     public NewTopic lowPriorityTopic(JobPipelineProperties props) {
-        return TopicBuilder.name(props.getTopics().getLow())
-                .partitions(props.getTopics().getPartitions().getLow())
-                .replicas(props.getTopics().getReplicationFactor())
+        return TopicBuilder.name(props.topics().low())
+                .partitions(props.topics().partitions().low())
+                .replicas(props.topics().replicationFactor())
                 .build();
     }
 
     @Bean
     public NewTopic dlqTopic(JobPipelineProperties props) {
-        return TopicBuilder.name(props.getTopics().getDlq())
-                .partitions(props.getTopics().getPartitions().getDlq())
-                .replicas(props.getTopics().getReplicationFactor())
+        return TopicBuilder.name(props.topics().dlq())
+                .partitions(props.topics().partitions().dlq())
+                .replicas(props.topics().replicationFactor())
                 .build();
     }
 
@@ -60,8 +60,8 @@ public class KafkaPipelineConfig {
             JobPipelineProperties jobProps) {
         return buildFactory(
                 kafkaProperties,
-                jobProps.getConsumer().getHighConcurrency(),
-                jobProps.getConsumer().getHighMaxPollRecords());
+                jobProps.consumer().highConcurrency(),
+                jobProps.consumer().highMaxPollRecords());
     }
 
     @Bean
@@ -70,8 +70,8 @@ public class KafkaPipelineConfig {
             JobPipelineProperties jobProps) {
         return buildFactory(
                 kafkaProperties,
-                jobProps.getConsumer().getNormalConcurrency(),
-                jobProps.getConsumer().getNormalMaxPollRecords());
+                jobProps.consumer().normalConcurrency(),
+                jobProps.consumer().normalMaxPollRecords());
     }
 
     @Bean
@@ -80,8 +80,8 @@ public class KafkaPipelineConfig {
             JobPipelineProperties jobProps) {
         return buildFactory(
                 kafkaProperties,
-                jobProps.getConsumer().getLowConcurrency(),
-                jobProps.getConsumer().getLowMaxPollRecords());
+                jobProps.consumer().lowConcurrency(),
+                jobProps.consumer().lowMaxPollRecords());
     }
 
     @Bean
@@ -90,7 +90,7 @@ public class KafkaPipelineConfig {
             JobPipelineProperties jobProps) {
         return buildFactory(
                 kafkaProperties,
-                jobProps.getConsumer().getDlqConcurrency(),
+                jobProps.consumer().dlqConcurrency(),
                 10);
     }
 
@@ -102,7 +102,7 @@ public class KafkaPipelineConfig {
             thread.setDaemon(true);
             return thread;
         };
-        return Executors.newFixedThreadPool(jobProps.getWorker().getExecutorPoolSize(), factory);
+        return Executors.newFixedThreadPool(jobProps.worker().executorPoolSize(), factory);
     }
 
     private ConcurrentKafkaListenerContainerFactory<String, String> buildFactory(
@@ -118,8 +118,9 @@ public class KafkaPipelineConfig {
         factory.setConsumerFactory(consumerFactory);
         factory.setConcurrency(concurrency);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
-        // Job retries are scheduled durably via the non-blocking outbox; only brief broker/DB hiccups retry in-container.
-        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(100L, 2L)));
+        // Job retries are scheduled durably via the outbox. This handler only sees infrastructure errors (e.g. the
+        // database is down while claiming), and retries in place until they clear so a dispatch is never skipped.
+        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, FixedBackOff.UNLIMITED_ATTEMPTS)));
         return factory;
     }
 }

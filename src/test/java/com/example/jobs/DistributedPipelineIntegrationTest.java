@@ -8,6 +8,7 @@ import com.example.jobs.domain.JobEntity;
 import com.example.jobs.domain.JobPriority;
 import com.example.jobs.domain.JobStatus;
 import com.example.jobs.domain.OutboxEventEntity;
+import com.example.jobs.domain.OutboxStatus;
 import com.example.jobs.messaging.JobDispatchEnvelope;
 import com.example.jobs.outbox.OutboxTxService;
 import com.example.jobs.repository.JobRepository;
@@ -15,6 +16,7 @@ import com.example.jobs.repository.OutboxEventRepository;
 import com.example.jobs.web.dto.DeadLetterJobResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
 import com.example.jobs.web.dto.JobStatusResponse;
+import com.example.jobs.web.dto.QueueDepthResponse;
 import com.example.jobs.worker.ClaimedJobAttempt;
 import com.example.jobs.worker.JobHandler;
 import com.example.jobs.worker.WorkerStateTxService;
@@ -299,7 +301,7 @@ class DistributedPipelineIntegrationTest {
             assertThat(mid.lastError()).isNotNull();
             assertThat(mid.lastError().type()).contains("SimulatedTransientFailureException");
             if (mid.state() == JobStatus.QUEUED) {
-                assertThat(mid.nextRetryAt()).isNotNull();
+                assertThat(mid.nextRetryAt()).isNotNull().isBefore(Instant.now().plusMillis(1100));
                 assertThat(mid.result()).isNull();
             }
         });
@@ -689,6 +691,65 @@ class DistributedPipelineIntegrationTest {
     private String headerValue(ConsumerRecord<String, String> record, String headerName) {
         var header = record.headers().lastHeader(headerName);
         return header != null ? new String(header.value(), java.nio.charset.StandardCharsets.UTF_8) : null;
+    }
+
+    @Test
+    void opsQueueDepthCancelAndDrainControlPendingJobsButNeverRunningOnes() throws Exception {
+        long delayedLowBefore = queueDepth().queued().get(JobPriority.LOW).delayed();
+
+        List<String> lowIds = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            lowIds.add(postJob(Map.of(
+                    "jobType", "echo", "priority", "LOW", "delayMs", 400,
+                    "payload", Map.of("message", "pending-" + i))).getBody().jobId());
+        }
+        QueueDepthResponse depth = queueDepth();
+        assertThat(depth.queued().get(JobPriority.LOW).delayed()).isEqualTo(delayedLowBefore + 3);
+
+        // Cancel one pending job: FAILED + JobCancelled, its outbox dispatch is cancelled, and it never runs.
+        ResponseEntity<JobStatusResponse> cancelled = restTemplate.postForEntity(
+                "/api/v1/ops/jobs/" + lowIds.get(0) + "/cancel", null, JobStatusResponse.class);
+        assertThat(cancelled.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(cancelled.getBody().state()).isEqualTo(JobStatus.FAILED);
+        assertThat(cancelled.getBody().lastError().type()).isEqualTo("JobCancelled");
+        assertThat(cancelled.getBody().finishedAt()).isNotNull();
+        assertThat(outboxEventRepository.findByJobIdOrderByCreatedAtAsc(lowIds.get(0)))
+                .extracting(OutboxEventEntity::getStatus).containsExactly(OutboxStatus.CANCELLED);
+        assertThat(queueDepth().queued().get(JobPriority.LOW).delayed()).isEqualTo(delayedLowBefore + 2);
+
+        // Drain only LOW priority: remaining pending jobs are cancelled.
+        ResponseEntity<Map<String, Integer>> drained = restTemplate.exchange(
+                "/api/v1/ops/queue/drain?priority=LOW", HttpMethod.POST, null, new ParameterizedTypeReference<>() {});
+        assertThat(drained.getBody().get("cancelled")).isGreaterThanOrEqualTo(2);
+        assertThat(queueDepth().queued().get(JobPriority.LOW).delayed()).isZero();
+        Thread.sleep(700);
+        for (String id : lowIds) {
+            JobStatusResponse status = getJob(id);
+            assertThat(status.state()).isEqualTo(JobStatus.FAILED);
+            assertThat(status.attemptCount()).isZero();
+            assertThat(status.lastError().type()).isEqualTo("JobCancelled");
+        }
+
+        // A RUNNING job cannot be cancelled and a drain leaves it alone; it completes normally.
+        String runningId = postJob(Map.of(
+                "jobType", "simulate", "payload", Map.of("simulateDelayMs", 600))).getBody().jobId();
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20)).untilAsserted(() ->
+                assertThat(getJob(runningId).state()).isEqualTo(JobStatus.RUNNING));
+        assertThat(restTemplate.postForEntity("/api/v1/ops/jobs/" + runningId + "/cancel", null, String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        restTemplate.postForEntity("/api/v1/ops/queue/drain", null, String.class);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(getJob(runningId).state()).isEqualTo(JobStatus.SUCCEEDED));
+
+        // Error handling.
+        assertThat(restTemplate.postForEntity("/api/v1/ops/jobs/" + UUID.randomUUID() + "/cancel", null, String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(restTemplate.postForEntity("/api/v1/ops/queue/drain?priority=BOGUS", null, String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    private QueueDepthResponse queueDepth() {
+        return restTemplate.getForObject("/api/v1/ops/queue", QueueDepthResponse.class);
     }
 
     private ResponseEntity<JobAcceptedResponse> postJob(Map<String, Object> requestMap) {
