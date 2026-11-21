@@ -1,6 +1,6 @@
 # Distributed Async Job Processing Pipeline
 
-A production-grade, horizontally scalable asynchronous job processing pipeline built with **Java 17+**, **Spring Boot 3.4**, **Spring Kafka**, **Spring Data JPA**, **Flyway**, and **PostgreSQL** (with **H2 + EmbeddedKafka** for self-contained `mvn test` execution).
+A production-grade, horizontally scalable asynchronous job processing pipeline built with **Java 17+**, **Spring Boot 3.4**, **Spring Kafka**, **Spring Data JPA**, **Flyway**, **PostgreSQL** and **Redis** (with **H2 + EmbeddedKafka + embedded Redis** for self-contained `mvn test` execution).
 
 ---
 
@@ -125,7 +125,7 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 
 | Layer | Mechanism |
 | --- | --- |
-| Submission | `idempotencyKey` has a DB `UNIQUE` constraint; repeats (even concurrent) return `202` with the original `jobId` and `"deduplicated": true`. |
+| Submission | Redis first, database as backstop (see below). Repeats, even concurrent ones, return `202` with the original `jobId` and `"deduplicated": true`. |
 | Dispatch | Kafka is at-least-once. A worker only runs a message if the conditional claim (`status = QUEUED AND attempt_count = expectedAttempt-1 AND replay_count = ...`) succeeds, so duplicate/stale messages are ignored. |
 | Completion | Result/failure writes are fenced by `leaseToken`, so a zombie worker cannot overwrite a recovered attempt. |
 | DLQ | Dead-letter records are unique per outbox event id; redelivery is a no-op. |
@@ -143,6 +143,38 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 | Retries exhausted | The job moves to `DEAD_LETTERED` (or `FAILED`), never silently dropped. | DLQ records are unique per event id. |
 
 So the *state transition* is effectively exactly-once (claim and completion are fenced by CAS and `leaseToken`), while *handler side effects* are at-least-once. Make handlers idempotent, e.g. key external writes on `jobId`.
+
+### Idempotency keys (Redis, no database read)
+
+1. The first request claims `jobs:idem:<key>` with `SET NX` as a short `PENDING` marker (`pending-ttl-ms`, 30s).
+2. The job is inserted, then the marker is replaced with the accepted response JSON for `ttl-ms` (24h).
+3. A duplicate gets that cached response straight from Redis, with no database query. If the original is still in
+   flight, the duplicate waits up to `await-ms` (2s) for it, then gets `409` and should retry.
+4. If inserting the job fails, the claim is released (compare-and-delete), so the client can retry right away.
+
+Redis speeds this up but is not the source of truth. If Redis is down, evicted the key, or failed over, the
+`UNIQUE(idempotency_key)` constraint rejects the duplicate insert. The original job is then read from the database
+(the only database read, and only in that case) and written back to Redis.
+
+### Rate limiting (10 requests per 3 seconds per client)
+
+Every `/api/v1/**` call except `/api/v1/ops/**` counts against the caller's limit. The limit is enforced cluster-wide by
+one atomic Redis Lua script (a sliding-window log in a sorted set, timed by Redis `TIME`, so every node uses the same clock).
+Unlike a fixed window, a client can never fit 20 requests across a window boundary.
+
+- The client is identified by the `X-Client-Id` header, or the remote IP if the header is absent. In production, derive
+  it from the authenticated API key at the gateway, because the header is supplied by the caller.
+- Every response carries `X-RateLimit-Limit` and `X-RateLimit-Remaining`. Over the limit you get `429` with
+  `Retry-After` (seconds) and a JSON error body.
+- If Redis is unreachable, the limiter **fails open** and logs a warning, so a Redis outage never takes the API down.
+  Redis is also left out of `/actuator/health` for the same reason.
+
+```bash
+for i in $(seq 1 11); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST localhost:8080/api/v1/jobs -H "X-Client-Id: demo" \
+    -H "Content-Type: application/json" -d '{"jobType":"echo","payload":{"message":"hi"}}'
+done   # 202 x10, then 429
+```
 
 ## Operational Controls (`/api/v1/ops`)
 
@@ -212,6 +244,9 @@ curl -s -X POST localhost:8080/api/v1/schedules/<id>/pause
 | `app.jobs.worker.heartbeat-interval-ms` | `2000` | Active attempt lease extension cadence |
 | `app.jobs.schedules.poll-interval-ms` | `1000` | How often each replica checks for due cron schedules (fire precision) |
 | `app.jobs.schedules.batch-size` | `100` | Max due schedules fired per poll per replica |
+| `spring.data.redis.host` / `port` | `localhost` / `6379` (`REDIS_HOST` / `REDIS_PORT`) | Redis for idempotency and rate limiting (250ms command timeout) |
+| `app.jobs.idempotency.ttl-ms` / `pending-ttl-ms` / `await-ms` | `86400000` / `30000` / `2000` | Cached response lifetime / in-flight claim lifetime / how long a duplicate waits for the in-flight original |
+| `app.jobs.rate-limit.enabled` / `limit` / `window-ms` | `true` / `10` / `3000` | Per-client sliding-window limit |
 
 ---
 
@@ -219,7 +254,7 @@ curl -s -X POST localhost:8080/api/v1/schedules/<id>/pause
 
 ### Self-Contained Test Suite (No Docker Required)
 
-Uses **EmbeddedKafka** and **H2 (PostgreSQL compatibility mode)** with Flyway migrations:
+Uses **EmbeddedKafka**, an **embedded Redis 6.2** server (started once per test JVM on a free port) and **H2 (PostgreSQL compatibility mode)** with Flyway migrations:
 
 ```bash
 mvn clean test
@@ -228,7 +263,7 @@ mvn clean test
 ### Running Locally with PostgreSQL & Kafka (KRaft)
 
 ```bash
-# 1. Start PostgreSQL 16 and Apache Kafka 3.9 (KRaft mode, no ZooKeeper)
+# 1. Start PostgreSQL 16, Redis 7 and Apache Kafka 3.9 (KRaft mode, no ZooKeeper)
 docker compose up -d
 
 # 2. Run node 1 on port 8080

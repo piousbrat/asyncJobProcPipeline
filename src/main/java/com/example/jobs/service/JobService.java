@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,6 +35,7 @@ public class JobService {
     private final DeadLetterRecordRepository deadLetterRecordRepository;
     private final JobWriteTxService jobWriteTxService;
     private final OutboxRelayScheduler outboxRelayScheduler;
+    private final IdempotencyCache idempotencyCache;
     private final ObjectMapper objectMapper;
 
     public JobService(
@@ -42,12 +44,14 @@ public class JobService {
             DeadLetterRecordRepository deadLetterRecordRepository,
             JobWriteTxService jobWriteTxService,
             OutboxRelayScheduler outboxRelayScheduler,
+            IdempotencyCache idempotencyCache,
             ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.jobAttemptRepository = jobAttemptRepository;
         this.deadLetterRecordRepository = deadLetterRecordRepository;
         this.jobWriteTxService = jobWriteTxService;
         this.outboxRelayScheduler = outboxRelayScheduler;
+        this.idempotencyCache = idempotencyCache;
         this.objectMapper = objectMapper;
     }
 
@@ -55,29 +59,47 @@ public class JobService {
         validateSubmission(request);
 
         String normalizedKey = normalizeIdempotencyKey(request.idempotencyKey());
+        String claimToken = UUID.randomUUID().toString();
         if (normalizedKey != null) {
-            Optional<JobEntity> existing = jobRepository.findByIdempotencyKey(normalizedKey);
+            Optional<JobAcceptedResponse> existing = idempotencyCache.claimOrGetExisting(normalizedKey, claimToken);
             if (existing.isPresent()) {
-                return toAcceptedResponse(existing.get(), true);
+                return existing.get();
             }
         }
 
         Instant now = Instant.now();
         Instant scheduledFor = resolveScheduledTime(request, now);
 
+        JobAcceptedResponse response;
         try {
-            JobEntity created = jobWriteTxService.insertJobAndOutbox(request, normalizedKey, now, scheduledFor);
-            if (!scheduledFor.isAfter(now)) {
-                outboxRelayScheduler.triggerImmediateFlush();
-            }
-            return toAcceptedResponse(created, false);
+            response = toAcceptedResponse(
+                    jobWriteTxService.insertJobAndOutbox(request, normalizedKey, now, scheduledFor), false);
         } catch (DataIntegrityViolationException ex) {
-            if (normalizedKey != null) {
-                return jobRepository.findByIdempotencyKey(normalizedKey)
-                        .map(winner -> toAcceptedResponse(winner, true))
-                        .orElseThrow(() -> ex);
+            // Redis lost the key (eviction, failover, outage): the DB constraint is the source of truth.
+            Optional<JobEntity> winner = normalizedKey != null
+                    ? jobRepository.findByIdempotencyKey(normalizedKey) : Optional.empty();
+            if (winner.isEmpty()) {
+                releaseClaim(normalizedKey, claimToken);
+                throw ex;
             }
+            response = toAcceptedResponse(winner.get(), true);
+        } catch (RuntimeException ex) {
+            releaseClaim(normalizedKey, claimToken);
             throw ex;
+        }
+
+        if (normalizedKey != null) {
+            idempotencyCache.complete(normalizedKey, response);
+        }
+        if (!response.deduplicated() && !scheduledFor.isAfter(now)) {
+            outboxRelayScheduler.triggerImmediateFlush();
+        }
+        return response;
+    }
+
+    private void releaseClaim(String key, String claimToken) {
+        if (key != null) {
+            idempotencyCache.release(key, claimToken);
         }
     }
 
