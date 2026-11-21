@@ -1,0 +1,94 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: async-job-pipeline
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/jobsdb}
+    username: ${SPRING_DATASOURCE_USERNAME:jobs}
+    password: ${SPRING_DATASOURCE_PASSWORD:jobs}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:20}
+      minimum-idle: 5
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 5
+      properties:
+        enable.idempotence: true
+    consumer:
+      group-id: ${KAFKA_CONSUMER_GROUP_ID:async-job-workers}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    listener:
+      ack-mode: record
+
+app:
+  jobs:
+    worker-id: ${WORKER_ID:${spring.application.name}-${random.uuid}}
+    defaults:
+      max-retries: 3
+      timeout-ms: 10000
+    topics:
+      high: jobs.high
+      normal: jobs.normal
+      low: jobs.low
+      dlq: jobs.dlq
+      partitions:
+        high: 6
+        normal: 3
+        low: 2
+        dlq: 3
+      replication-factor: 1
+    consumer:
+      high-concurrency: 4
+      normal-concurrency: 2
+      low-concurrency: 1
+      dlq-concurrency: 1
+      high-max-poll-records: 10
+      normal-max-poll-records: 5
+      low-max-poll-records: 2
+    retry:
+      base-interval-ms: 1000
+      multiplier: 2.0
+      max-interval-ms: 60000
+      jitter-factor: 0.3
+    outbox:
+      poll-interval-ms: 200
+      batch-size: 50
+      lock-duration-ms: 30000
+      send-timeout-ms: 5000
+    worker:
+      executor-pool-size: 16
+      lease-grace-ms: 5000
+      heartbeat-interval-ms: 2000
+      stale-recovery-interval-ms: 2000
+      stale-recovery-batch-size: 25
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+logging:
+  level:
+    com.example.jobs: INFO
+    org.apache.kafka: WARN
