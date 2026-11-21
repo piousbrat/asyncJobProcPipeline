@@ -6,7 +6,6 @@ import com.example.jobs.worker.JobHandler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.Map;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -24,18 +23,11 @@ public class EchoJobHandler implements JobHandler {
     }
 
     @Override
-    public Map<String, String> validatePayload(JsonNode payload) {
-        JsonNode message = payload.get("message");
-        if (message == null || !message.isTextual() || message.asText().isBlank()) {
-            return Map.of("message", "must be a non-blank string");
-        }
-        return Map.of();
-    }
-
-    @Override
     public JsonNode execute(JobExecutionContext context) {
-        InvalidPayloadException.throwIfAny(validatePayload(context.payload()));
         JsonNode messageNode = context.payload().get("message");
+        if (messageNode == null || messageNode.isNull() || messageNode.asText().isBlank()) {
+            throw new InvalidPayloadException("echo job requires a non-blank 'message' field in payload");
+        }
         ObjectNode result = objectMapper.createObjectNode();
         result.put("echo", messageNode.asText());
         result.put("attempt", context.attemptNumber());
