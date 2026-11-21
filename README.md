@@ -164,6 +164,39 @@ curl -s -X POST localhost:8080/api/v1/ops/jobs/<jobId>/cancel
 curl -s -X POST "localhost:8080/api/v1/ops/queue/drain?priority=LOW"
 ```
 
+## Delayed & Recurring (Cron) Jobs
+
+**Delayed (one-off):** set `delayMs` or `scheduledAt` on `POST /api/v1/jobs`. The job is `QUEUED` immediately, but its
+outbox row gets `available_at = scheduledFor`, so the relay does not publish it to Kafka before then. Past timestamps run now.
+
+**Recurring:** a schedule stores a cron expression, a time zone and a job template. Every replica polls
+`job_schedules` with `FOR UPDATE SKIP LOCKED`; for each due schedule it creates an ordinary job (same outbox, retry, DLQ and
+status API) and advances `next_run_at` **in the same transaction**, so each fire time creates exactly one job cluster-wide.
+
+| Endpoint | Behaviour |
+| --- | --- |
+| `POST /api/v1/schedules` | `{name, cron, timeZone?, job}` -> `201`. `job` is a normal submission body without `scheduledAt`/`delayMs`/`idempotencyKey`. `400` bad cron/zone, `409` duplicate name. |
+| `GET /api/v1/schedules[/{id}]` | List or inspect: `nextRunAt`, `lastRunAt`, `lastJobId`. |
+| `POST /api/v1/schedules/{id}/pause` / `resume` | Stop firing / restart from the next fire time after now. |
+| `DELETE /api/v1/schedules/{id}` | Remove the schedule (jobs already created are unaffected). |
+
+- Cron: Spring 6-field (`sec min hour day month weekday`), classic 5-field Unix cron (seconds default to `0`) or macros
+  like `@hourly`. `timeZone` is an IANA id (default `UTC`), so `0 0 9 * * MON-FRI` in `Asia/Kolkata` handles the zone correctly.
+- Spawned jobs carry `metadata.scheduleId` and `metadata.scheduledFireTime`.
+- Missed fires (all replicas down) are coalesced into **one** catch-up run, then the schedule continues from now.
+- Runs may overlap if a job takes longer than the cron interval; make the handler tolerate it or pick a wider interval.
+
+```bash
+curl -s -X POST localhost:8080/api/v1/schedules -H "Content-Type: application/json" -d '{
+  "name": "daily-settlement-report",
+  "cron": "0 30 9 * * MON-FRI",
+  "timeZone": "Asia/Kolkata",
+  "job": { "jobType": "report.generate", "priority": "HIGH", "payload": { "reportName": "settlement", "rows": 500 } }
+}'
+curl -s localhost:8080/api/v1/schedules
+curl -s -X POST localhost:8080/api/v1/schedules/<id>/pause
+```
+
 ---
 
 ## Configuration (`application.yml`)
@@ -177,6 +210,8 @@ curl -s -X POST "localhost:8080/api/v1/ops/queue/drain?priority=LOW"
 | `app.jobs.outbox.batch-size` | `50` | Outbox claim batch size per replica |
 | `app.jobs.worker.lease-grace-ms` | `5000` | Extra lease buffer beyond `timeoutMs` |
 | `app.jobs.worker.heartbeat-interval-ms` | `2000` | Active attempt lease extension cadence |
+| `app.jobs.schedules.poll-interval-ms` | `1000` | How often each replica checks for due cron schedules (fire precision) |
+| `app.jobs.schedules.batch-size` | `100` | Max due schedules fired per poll per replica |
 
 ---
 

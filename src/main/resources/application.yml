@@ -75,6 +75,9 @@ app:
       heartbeat-interval-ms: 2000
       stale-recovery-interval-ms: 2000
       stale-recovery-batch-size: 25
+    schedules:
+      poll-interval-ms: 1000
+      batch-size: 100
 
 management:
   endpoints:

@@ -2,6 +2,7 @@ package com.example.jobs.web;
 
 import com.example.jobs.exception.JobNotFoundException;
 import com.example.jobs.exception.JobStateConflictException;
+import com.example.jobs.exception.ScheduleNotFoundException;
 import com.example.jobs.web.dto.ApiErrorResponse;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
@@ -41,9 +42,9 @@ public class ApiExceptionHandler {
         return buildError(HttpStatus.BAD_REQUEST, message, request.getRequestURI(), null);
     }
 
-    @ExceptionHandler(JobNotFoundException.class)
+    @ExceptionHandler({JobNotFoundException.class, ScheduleNotFoundException.class})
     public ResponseEntity<ApiErrorResponse> handleNotFound(
-            JobNotFoundException ex,
+            RuntimeException ex,
             HttpServletRequest request) {
         return buildError(HttpStatus.NOT_FOUND, ex.getMessage(), request.getRequestURI(), null);
     }
