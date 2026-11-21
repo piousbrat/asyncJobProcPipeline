@@ -153,6 +153,9 @@ class RecurringScheduleIntegrationTest {
         assertThat(create(schedule("0 0 * * * *", null,
                 Map.of("jobType", "echo", "payload", Map.of(), "delayMs", 1000))).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(create(schedule("0 0 * * * *", null,
+                Map.of("jobId", "fixed", "jobType", "echo", "payload", Map.of("message", "hi")))).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(create(schedule("0 0 * * * *", null, Map.of("jobType", "echo"))).getStatusCode())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         ResponseEntity<String> unknownType = restTemplate.postForEntity("/api/v1/schedules",

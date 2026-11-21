@@ -58,7 +58,7 @@ A production-grade, horizontally scalable asynchronous job processing pipeline b
 
 1. **Decoupled, Crash-Safe Submission (Transactional Outbox)**:
    - `POST /api/v1/jobs` validates input, writes the `jobs` row (`QUEUED`) and an `outbox_events` row (`PENDING`, `available_at = scheduledFor`) inside a **single database transaction**, and returns `202 Accepted` immediately without blocking on Kafka broker round-trips.
-   - Every submission gets an idempotency key (explicit `idempotencyKey`, `X-Event-Id`, or a per-client request fingerprint). Duplicates are answered from Redis with `"deduplicated": true`, and the database `UNIQUE` constraint is the backstop when Redis is unavailable (see [Delivery Guarantees & Duplicate Execution](#delivery-guarantees--duplicate-execution)).
+   - Every submission gets an idempotency key (a client-chosen `jobId`, explicit `idempotencyKey`, `X-Event-Id`, or a per-client request fingerprint). Duplicates are answered from Redis with `"deduplicated": true`, and the database `UNIQUE` constraint is the backstop when Redis is unavailable (see [Delivery Guarantees & Duplicate Execution](#delivery-guarantees--duplicate-execution)).
 
 2. **Zero Double-Dispatch Across Replicas (`FOR UPDATE SKIP LOCKED`)**:
    - `OutboxRelayScheduler` claims due outbox batches (`available_at <= now`) using `SELECT ... FOR UPDATE SKIP LOCKED` ordered by `priority_rank ASC, available_at ASC`.
@@ -112,7 +112,7 @@ flowchart TD
     SV -- "both scheduledAt and delayMs" --> E400e["400 Validation failed<br/>fieldErrors.delayMs"]:::reject
     SV -- "ok" --> KEY
 
-    KEY["④ Resolve idempotency key<br/>1. idempotencyKey from the body<br/>2. else X-Event-Id header, scoped to the client<br/>3. else fingerprint of client + request, 10-minute window"]:::step
+    KEY["④ Resolve idempotency key<br/>1. jobId from the body (also becomes the job's id)<br/>2. else idempotencyKey from the body<br/>3. else X-Event-Id header, scoped to the client<br/>4. else fingerprint of client + request, 10-minute window"]:::step
     KEY --> RC
 
     RC{"⑤ Redis claim<br/>SET NX jobs:idem:&lt;key&gt; = PENDING"}:::check
@@ -327,7 +327,7 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 
 | Layer | Mechanism |
 | --- | --- |
-| Submission | Every request gets an idempotency key (explicit, `X-Event-Id`, or a request fingerprint), checked in Redis first with the database as backstop (see below). Repeats, even concurrent ones, return `202` with the original `jobId` and `"deduplicated": true`. |
+| Submission | Every request gets an idempotency key (`jobId`, explicit key, `X-Event-Id`, or a request fingerprint), checked in Redis first with the database as backstop (see below). Repeats, even concurrent ones, return `202` with the original `jobId` and `"deduplicated": true`. |
 | Dispatch | Kafka is at-least-once. A worker only runs a message if the conditional claim (`status = QUEUED AND attempt_count = expectedAttempt-1 AND replay_count = ...`) succeeds, so duplicate/stale messages are ignored. |
 | Completion | Result/failure writes are fenced by `leaseToken`, so a zombie worker cannot overwrite a recovered attempt. |
 | DLQ | Dead-letter records are unique per outbox event id; redelivery is a no-op. |
@@ -354,7 +354,7 @@ bound (below).
 ### Where it is NOT guaranteed
 
 - **Before `202`.** A timeout, connection drop, `5xx`, `429` (rate limited) or `409` (key still in flight) means no job
-  may exist. The client must retry. Retrying with the same `idempotencyKey` or `X-Event-Id` is always safe.
+  may exist. The client must retry. Retrying with the same `jobId`, `idempotencyKey` or `X-Event-Id` is always safe.
 - **Retry budget exhausted.** At-least-once means at least one attempt, not success. After `maxRetries` (default 3)
   the job is `DEAD_LETTERED` (or `FAILED` for `TerminalJobFailureException` / `routeToDlq=false`) and needs a manual replay.
 - **A worker dies with `maxRetries=0`.** The lease-expired attempt counts as the only attempt, so the job goes to the DLQ
@@ -398,10 +398,17 @@ Every submission gets a key, so retries are safe even when the client sends none
 
 | Priority | Key | Cached in Redis | Stored in `jobs.idempotency_key` |
 | --- | --- | --- | --- |
-| 1 | `idempotencyKey` in the body, as-is | `ttl-ms` (24h) | the key (unique forever) |
-| 2 | `X-Event-Id` header: `evt:sha256(client, eventId)` | `ttl-ms` (24h) | same (unique forever) |
-| 3 | Neither: `fp:sha256(client, canonical request body)` | `fingerprint-window-ms` (10 min) from the first submission | `fp:...:<epochMs / window>` |
+| 1 | `jobId` in the body: `job:<jobId>`. The job is stored under that id. | `ttl-ms` (24h) | same, and the job's primary key (unique forever) |
+| 2 | `idempotencyKey` in the body, as-is | `ttl-ms` (24h) | the key (unique forever) |
+| 3 | `X-Event-Id` header: `evt:sha256(client, eventId)` | `ttl-ms` (24h) | same (unique forever) |
+| 4 | None of these: `fp:sha256(client, canonical request body)` | `fingerprint-window-ms` (10 min) from the first submission | `fp:...:<epochMs / window>` |
 
+- `jobId` (optional, 1-64 characters of letters, digits, `.`, `_`, `:`, `-`) lets the client name the job, e.g. after
+  its own order or event id. The `202` echoes it and `GET /api/v1/jobs/{jobId}` works with it directly. It is unique
+  across all clients: a repeat, from any client and with any body, returns the original job with
+  `"deduplicated": true`. If Redis has lost the key, the primary key catches the repeat and the original job is
+  returned (never overwritten). Without `jobId`, the server generates a UUID. `jobId` isn't allowed in a schedule's job
+  template, since each fire is a new job.
 - The client is `X-Client-Id`, or the remote IP if that header is absent. The fingerprint covers every request field,
   with JSON keys sorted, so field order doesn't matter.
 - An event id is the event's identity, so a redelivered event is the same job even if its body changed. It is scoped
@@ -475,7 +482,7 @@ status API) and advances `next_run_at` **in the same transaction**, so each fire
 
 | Endpoint | Behaviour |
 | --- | --- |
-| `POST /api/v1/schedules` | `{name, cron, timeZone?, job}` -> `201`. `job` is a normal submission body without `scheduledAt`/`delayMs`/`idempotencyKey`. `400` bad cron/zone, `409` duplicate name. |
+| `POST /api/v1/schedules` | `{name, cron, timeZone?, job}` -> `201`. `job` is a normal submission body without `jobId`/`scheduledAt`/`delayMs`/`idempotencyKey`. `400` bad cron/zone, `409` duplicate name. |
 | `GET /api/v1/schedules[/{id}]` | List or inspect: `nextRunAt`, `lastRunAt`, `lastJobId`. |
 | `POST /api/v1/schedules/{id}/pause` / `resume` | Stop firing / restart from the next fire time after now. |
 | `DELETE /api/v1/schedules/{id}` | Remove the schedule (jobs already created are unaffected). |
@@ -595,6 +602,12 @@ curl -i -X POST http://localhost:8080/api/v1/jobs \
 
 # Check status, timestamps, attempt history, and persisted JSON result:
 curl -s http://localhost:8080/api/v1/jobs/<jobId>
+
+# Or name the job yourself: the id is the idempotency key, and repeats return the same job
+curl -s -X POST http://localhost:8080/api/v1/jobs \
+  -H "Content-Type: application/json" \
+  -d '{ "jobId": "order-1001-invoice", "jobType": "echo", "payload": { "message": "invoice 1001" } }'
+curl -s http://localhost:8080/api/v1/jobs/order-1001-invoice
 ```
 
 ### 2. High-Priority Job (`jobs.high`)

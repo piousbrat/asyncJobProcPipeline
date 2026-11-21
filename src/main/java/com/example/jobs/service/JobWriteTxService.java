@@ -47,7 +47,7 @@ public class JobWriteTxService {
             Instant now,
             Instant scheduledFor) {
         JobEntity job = new JobEntity();
-        job.setId(UUID.randomUUID().toString());
+        job.setId(request.jobId() != null ? request.jobId() : UUID.randomUUID().toString());
         job.setIdempotencyKey(normalizedIdempotencyKey);
         job.setJobType(request.jobType().trim());
         job.setPriority(request.priority() != null ? request.priority() : JobPriority.NORMAL);

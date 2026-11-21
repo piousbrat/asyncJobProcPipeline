@@ -56,8 +56,9 @@ public class ScheduleService {
         if (job.payload() == null || !job.payload().isObject()) {
             throw new RequestValidationException("job.payload", "job.payload must be a JSON object");
         }
-        if (job.scheduledAt() != null || job.delayMs() != null || job.idempotencyKey() != null) {
-            throw new IllegalArgumentException("scheduledAt, delayMs and idempotencyKey are not allowed in a schedule's job");
+        if (job.jobId() != null || job.scheduledAt() != null || job.delayMs() != null || job.idempotencyKey() != null) {
+            throw new IllegalArgumentException(
+                    "jobId, scheduledAt, delayMs and idempotencyKey are not allowed in a schedule's job");
         }
         String name = request.name().trim();
         if (scheduleRepository.existsByName(name)) {
@@ -125,7 +126,7 @@ public class ScheduleService {
             Map<String, String> metadata = new LinkedHashMap<>(template.metadata() != null ? template.metadata() : Map.of());
             metadata.put("scheduleId", schedule.getId());
             metadata.put("scheduledFireTime", schedule.getNextRunAt().toString());
-            CreateJobRequest request = new CreateJobRequest(template.jobType(), template.payload(), null, null,
+            CreateJobRequest request = new CreateJobRequest(null, template.jobType(), template.payload(), null, null,
                     template.priority(), template.maxRetries(), template.timeoutMs(), null, metadata,
                     template.routeToDlq());
 
