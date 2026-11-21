@@ -1,8 +1,10 @@
 package com.example.jobs.repository;
 
 import com.example.jobs.domain.JobEntity;
+import com.example.jobs.domain.JobPriority;
 import com.example.jobs.domain.JobStatus;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -72,6 +74,48 @@ public interface JobRepository extends JpaRepository<JobEntity, String> {
             @Param("failedStatus") JobStatus failedStatus,
             @Param("deadLetteredStatus") JobStatus deadLetteredStatus,
             @Param("now") Instant now);
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE JobEntity j
+            SET j.status = :failed, j.finishedAt = :now, j.nextRetryAt = NULL,
+                j.lastErrorType = :errorType, j.lastErrorMessage = :errorMessage,
+                j.updatedAt = :now, j.version = j.version + 1
+            WHERE j.status = :queued AND j.priority IN :priorities
+            """)
+    int cancelQueued(
+            @Param("priorities") Collection<JobPriority> priorities,
+            @Param("queued") JobStatus queued,
+            @Param("failed") JobStatus failed,
+            @Param("errorType") String errorType,
+            @Param("errorMessage") String errorMessage,
+            @Param("now") Instant now);
+
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            UPDATE JobEntity j
+            SET j.status = :failed, j.finishedAt = :now, j.nextRetryAt = NULL,
+                j.lastErrorType = :errorType, j.lastErrorMessage = :errorMessage,
+                j.updatedAt = :now, j.version = j.version + 1
+            WHERE j.status = :queued AND j.id = :jobId
+            """)
+    int cancelQueuedById(
+            @Param("jobId") String jobId,
+            @Param("queued") JobStatus queued,
+            @Param("failed") JobStatus failed,
+            @Param("errorType") String errorType,
+            @Param("errorMessage") String errorMessage,
+            @Param("now") Instant now);
+
+    @Query("SELECT j.status, j.priority, COUNT(j) FROM JobEntity j GROUP BY j.status, j.priority")
+    List<Object[]> countByStatusAndPriority();
+
+    @Query("""
+            SELECT j.priority, COUNT(j) FROM JobEntity j
+            WHERE j.status = :queued AND COALESCE(j.nextRetryAt, j.scheduledFor) > :now
+            GROUP BY j.priority
+            """)
+    List<Object[]> countDelayedByPriority(@Param("queued") JobStatus queued, @Param("now") Instant now);
 
     @Query(value = """
             SELECT * FROM jobs

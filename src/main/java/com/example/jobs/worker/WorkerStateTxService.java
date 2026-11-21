@@ -14,6 +14,7 @@ import com.example.jobs.exception.TerminalJobFailureException;
 import com.example.jobs.messaging.DeadLetterEnvelope;
 import com.example.jobs.messaging.JobDispatchEnvelope;
 import com.example.jobs.messaging.PriorityTopicResolver;
+import com.example.jobs.outbox.OutboxEvents;
 import com.example.jobs.outbox.OutboxRelayScheduler;
 import com.example.jobs.repository.JobAttemptRepository;
 import com.example.jobs.repository.JobRepository;
@@ -52,6 +53,7 @@ public class WorkerStateTxService {
     private final OutboxEventRepository outboxEventRepository;
     private final PriorityTopicResolver topicResolver;
     private final JitteredExponentialBackoffCalculator backoffCalculator;
+    private final OutboxEvents outboxEvents;
     private final OutboxRelayScheduler outboxRelayScheduler;
     private final JobPipelineProperties properties;
     private final ObjectMapper objectMapper;
@@ -62,6 +64,7 @@ public class WorkerStateTxService {
             OutboxEventRepository outboxEventRepository,
             PriorityTopicResolver topicResolver,
             JitteredExponentialBackoffCalculator backoffCalculator,
+            OutboxEvents outboxEvents,
             OutboxRelayScheduler outboxRelayScheduler,
             JobPipelineProperties properties,
             ObjectMapper objectMapper) {
@@ -70,6 +73,7 @@ public class WorkerStateTxService {
         this.outboxEventRepository = outboxEventRepository;
         this.topicResolver = topicResolver;
         this.backoffCalculator = backoffCalculator;
+        this.outboxEvents = outboxEvents;
         this.outboxRelayScheduler = outboxRelayScheduler;
         this.properties = properties;
         this.objectMapper = objectMapper;
@@ -99,7 +103,7 @@ public class WorkerStateTxService {
 
         Instant now = Instant.now();
         String leaseToken = UUID.randomUUID().toString();
-        long leaseDurationMs = existing.getTimeoutMs() + properties.getWorker().getLeaseGraceMs();
+        long leaseDurationMs = existing.getTimeoutMs() + properties.worker().leaseGraceMs();
         Instant leaseExpiresAt = now.plusMillis(leaseDurationMs);
 
         int updated = jobRepository.claimQueuedAttempt(
@@ -108,7 +112,7 @@ public class WorkerStateTxService {
                 JobStatus.RUNNING,
                 expectedPriorAttempt,
                 envelope.replayGeneration(),
-                properties.getWorkerId(),
+                properties.workerId(),
                 leaseToken,
                 leaseExpiresAt,
                 now);
@@ -125,7 +129,7 @@ public class WorkerStateTxService {
         attempt.setJobId(claimedJob.getId());
         attempt.setAttemptNumber(claimedJob.getAttemptCount());
         attempt.setReplayGeneration(claimedJob.getReplayCount());
-        attempt.setWorkerId(properties.getWorkerId());
+        attempt.setWorkerId(properties.workerId());
         attempt.setStatus(AttemptStatus.RUNNING);
         attempt.setStartedAt(now);
         jobAttemptRepository.save(attempt);
@@ -136,7 +140,7 @@ public class WorkerStateTxService {
     @Transactional
     public boolean renewLease(String jobId, String leaseToken, long timeoutMs) {
         Instant now = Instant.now();
-        Instant extended = now.plusMillis(timeoutMs + properties.getWorker().getLeaseGraceMs());
+        Instant extended = now.plusMillis(timeoutMs + properties.worker().leaseGraceMs());
         return jobRepository.extendLease(jobId, JobStatus.RUNNING, leaseToken, extended, now) > 0;
     }
 
@@ -273,32 +277,7 @@ public class WorkerStateTxService {
             jobRepository.save(job);
 
             int nextAttempt = job.getAttemptCount() + 1;
-            JobDispatchEnvelope retryEnvelope = new JobDispatchEnvelope(
-                    job.getId(),
-                    job.getJobType(),
-                    job.getPriority(),
-                    nextAttempt,
-                    job.getReplayCount(),
-                    now);
-
-            OutboxEventEntity retryOutbox = new OutboxEventEntity();
-            retryOutbox.setId(UUID.randomUUID().toString());
-            retryOutbox.setJobId(job.getId());
-            retryOutbox.setEventType(OutboxEventType.JOB_DISPATCH);
-            retryOutbox.setTopic(topicResolver.topicFor(job.getPriority()));
-            retryOutbox.setPartitionKey(job.getId());
-            retryOutbox.setPriorityRank(job.getPriority().rank());
-            retryOutbox.setPayloadJson(writeJson(retryEnvelope));
-            retryOutbox.setHeadersJson(writeJson(Map.of(
-                    "x-job-id", job.getId(),
-                    "x-job-type", job.getJobType(),
-                    "x-job-priority", job.getPriority().name(),
-                    "x-expected-attempt", String.valueOf(nextAttempt))));
-            retryOutbox.setStatus(OutboxStatus.PENDING);
-            retryOutbox.setAvailableAt(nextRetryAt);
-            retryOutbox.setPublishAttempts(0);
-            retryOutbox.setCreatedAt(now);
-            outboxEventRepository.save(retryOutbox);
+            outboxEvents.enqueueDispatch(job, nextAttempt, nextRetryAt, now);
 
             log.info("Scheduled retry #{} (attempt {}) for job {} in {}ms at {} ({}: {})",
                     retryNumber, nextAttempt, job.getId(), backoffMs, nextRetryAt, errorType, errorMessage);

@@ -80,7 +80,7 @@ public class JobExecutionEngine {
         JobEntity job = claimed.job();
         long timeoutMs = job.getTimeoutMs();
 
-        long heartbeatPeriodMs = properties.getWorker().getHeartbeatIntervalMs();
+        long heartbeatPeriodMs = properties.worker().heartbeatIntervalMs();
         ScheduledFuture<?> heartbeatTask = leaseHeartbeatScheduler.scheduleAtFixedRate(
                 () -> safeRenewLease(job.getId(), claimed.leaseToken(), timeoutMs),
                 heartbeatPeriodMs,
@@ -174,7 +174,7 @@ public class JobExecutionEngine {
                 job.getAttemptCount(),
                 job.getMaxRetries(),
                 job.getTimeoutMs(),
-                properties.getWorkerId(),
+                properties.workerId(),
                 payload,
                 metadata,
                 job.getSubmittedAt());

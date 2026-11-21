@@ -26,6 +26,6 @@ public class StaleJobRecoveryScheduler {
     public void recoverStaleJobs() {
         workerStateTxService.recoverExpiredRunningJobs(
                 Instant.now(),
-                properties.getWorker().getStaleRecoveryBatchSize());
+                properties.worker().staleRecoveryBatchSize());
     }
 }

@@ -15,13 +15,13 @@ public class PriorityTopicResolver {
 
     public String topicFor(JobPriority priority) {
         return switch (priority) {
-            case HIGH -> properties.getTopics().getHigh();
-            case NORMAL -> properties.getTopics().getNormal();
-            case LOW -> properties.getTopics().getLow();
+            case HIGH -> properties.topics().high();
+            case NORMAL -> properties.topics().normal();
+            case LOW -> properties.topics().low();
         };
     }
 
     public String dlqTopic() {
-        return properties.getTopics().getDlq();
+        return properties.topics().dlq();
     }
 }

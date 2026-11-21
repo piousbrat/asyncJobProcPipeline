@@ -27,10 +27,10 @@ public class JitteredExponentialBackoffCalculator {
     @Autowired
     public JitteredExponentialBackoffCalculator(JobPipelineProperties properties) {
         this(
-                properties.getRetry().getBaseIntervalMs(),
-                properties.getRetry().getMultiplier(),
-                properties.getRetry().getMaxIntervalMs(),
-                properties.getRetry().getJitterFactor(),
+                properties.retry().baseIntervalMs(),
+                properties.retry().multiplier(),
+                properties.retry().maxIntervalMs(),
+                properties.retry().jitterFactor(),
                 () -> ThreadLocalRandom.current().nextDouble());
     }
 

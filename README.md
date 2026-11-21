@@ -122,6 +122,37 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 
 ---
 
+## Idempotency & Duplicate Safety
+
+| Layer | Mechanism |
+| --- | --- |
+| Submission | `idempotencyKey` has a DB `UNIQUE` constraint; repeats (even concurrent) return `202` with the original `jobId` and `"deduplicated": true`. |
+| Dispatch | Kafka is at-least-once. A worker only runs a message if the conditional claim (`status = QUEUED AND attempt_count = expectedAttempt-1 AND replay_count = ...`) succeeds, so duplicate/stale messages are ignored. |
+| Completion | Result/failure writes are fenced by `leaseToken`, so a zombie worker cannot overwrite a recovered attempt. |
+| DLQ | Dead-letter records are unique per outbox event id; redelivery is a no-op. |
+
+## Operational Controls (`/api/v1/ops`)
+
+These endpoints are unauthenticated; expose them only on an internal network or behind your gateway.
+
+| Endpoint | Behaviour |
+| --- | --- |
+| `GET /api/v1/ops/queue` | Backlog per priority: `ready` (QUEUED and due) vs `delayed` (scheduled or awaiting retry backoff), plus `running` and `outboxPending` (not yet published to Kafka). |
+| `POST /api/v1/ops/jobs/{jobId}/cancel` | Cancels one `QUEUED` job (`404` unknown, `409` if not `QUEUED`). |
+| `POST /api/v1/ops/queue/drain[?priority=LOW]` | Cancels every `QUEUED` job (optionally one priority) and returns `{"cancelled": n}`. |
+
+A cancelled job ends as `FAILED` with `lastError.type = "JobCancelled"` (the state set is unchanged). Its pending outbox
+dispatch is marked `CANCELLED`; if the Kafka message was already published, the worker's conditional claim skips it.
+`RUNNING` attempts are never interrupted and finish normally.
+
+```bash
+curl -s localhost:8080/api/v1/ops/queue
+curl -s -X POST localhost:8080/api/v1/ops/jobs/<jobId>/cancel
+curl -s -X POST "localhost:8080/api/v1/ops/queue/drain?priority=LOW"
+```
+
+---
+
 ## Configuration (`application.yml`)
 
 | Property | Default | Description |

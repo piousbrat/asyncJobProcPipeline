@@ -7,8 +7,12 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import lombok.Getter;
+import lombok.Setter;
 
 @Entity
+@Getter
+@Setter
 @Table(name = "dead_letter_jobs")
 public class DeadLetterRecordEntity {
 
@@ -61,135 +65,4 @@ public class DeadLetterRecordEntity {
 
     @Column(name = "replayed_at")
     private Instant replayedAt;
-
-    public DeadLetterRecordEntity() {
-    }
-
-    public String getId() {
-        return id;
-    }
-
-    public void setId(String id) {
-        this.id = id;
-    }
-
-    public String getJobId() {
-        return jobId;
-    }
-
-    public void setJobId(String jobId) {
-        this.jobId = jobId;
-    }
-
-    public String getOutboxEventId() {
-        return outboxEventId;
-    }
-
-    public void setOutboxEventId(String outboxEventId) {
-        this.outboxEventId = outboxEventId;
-    }
-
-    public String getJobType() {
-        return jobType;
-    }
-
-    public void setJobType(String jobType) {
-        this.jobType = jobType;
-    }
-
-    public JobPriority getPriority() {
-        return priority;
-    }
-
-    public void setPriority(JobPriority priority) {
-        this.priority = priority;
-    }
-
-    public String getPayloadJson() {
-        return payloadJson;
-    }
-
-    public void setPayloadJson(String payloadJson) {
-        this.payloadJson = payloadJson;
-    }
-
-    public int getAttemptCount() {
-        return attemptCount;
-    }
-
-    public void setAttemptCount(int attemptCount) {
-        this.attemptCount = attemptCount;
-    }
-
-    public int getMaxRetries() {
-        return maxRetries;
-    }
-
-    public void setMaxRetries(int maxRetries) {
-        this.maxRetries = maxRetries;
-    }
-
-    public String getFailureReason() {
-        return failureReason;
-    }
-
-    public void setFailureReason(String failureReason) {
-        this.failureReason = failureReason;
-    }
-
-    public String getErrorType() {
-        return errorType;
-    }
-
-    public void setErrorType(String errorType) {
-        this.errorType = errorType;
-    }
-
-    public String getErrorMessage() {
-        return errorMessage;
-    }
-
-    public void setErrorMessage(String errorMessage) {
-        this.errorMessage = errorMessage;
-    }
-
-    public String getStackTrace() {
-        return stackTrace;
-    }
-
-    public void setStackTrace(String stackTrace) {
-        this.stackTrace = stackTrace;
-    }
-
-    public String getOriginalTopic() {
-        return originalTopic;
-    }
-
-    public void setOriginalTopic(String originalTopic) {
-        this.originalTopic = originalTopic;
-    }
-
-    public Instant getDeadLetteredAt() {
-        return deadLetteredAt;
-    }
-
-    public void setDeadLetteredAt(Instant deadLetteredAt) {
-        this.deadLetteredAt = deadLetteredAt;
-    }
-
-    public boolean isReplayed() {
-        return replayed;
-    }
-
-    public void setReplayed(boolean replayed) {
-        this.replayed = replayed;
-    }
-
-    public Instant getReplayedAt() {
-        return replayedAt;
-    }
-
-    public void setReplayedAt(Instant replayedAt) {
-        this.replayedAt = replayedAt;
-    }
 }

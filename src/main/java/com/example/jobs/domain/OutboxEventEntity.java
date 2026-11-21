@@ -7,8 +7,12 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import java.time.Instant;
+import lombok.Getter;
+import lombok.Setter;
 
 @Entity
+@Getter
+@Setter
 @Table(name = "outbox_events")
 public class OutboxEventEntity {
 
@@ -62,135 +66,4 @@ public class OutboxEventEntity {
 
     @Column(name = "published_at")
     private Instant publishedAt;
-
-    public OutboxEventEntity() {
-    }
-
-    public String getId() {
-        return id;
-    }
-
-    public void setId(String id) {
-        this.id = id;
-    }
-
-    public String getJobId() {
-        return jobId;
-    }
-
-    public void setJobId(String jobId) {
-        this.jobId = jobId;
-    }
-
-    public OutboxEventType getEventType() {
-        return eventType;
-    }
-
-    public void setEventType(OutboxEventType eventType) {
-        this.eventType = eventType;
-    }
-
-    public String getTopic() {
-        return topic;
-    }
-
-    public void setTopic(String topic) {
-        this.topic = topic;
-    }
-
-    public String getPartitionKey() {
-        return partitionKey;
-    }
-
-    public void setPartitionKey(String partitionKey) {
-        this.partitionKey = partitionKey;
-    }
-
-    public int getPriorityRank() {
-        return priorityRank;
-    }
-
-    public void setPriorityRank(int priorityRank) {
-        this.priorityRank = priorityRank;
-    }
-
-    public String getPayloadJson() {
-        return payloadJson;
-    }
-
-    public void setPayloadJson(String payloadJson) {
-        this.payloadJson = payloadJson;
-    }
-
-    public String getHeadersJson() {
-        return headersJson;
-    }
-
-    public void setHeadersJson(String headersJson) {
-        this.headersJson = headersJson;
-    }
-
-    public OutboxStatus getStatus() {
-        return status;
-    }
-
-    public void setStatus(OutboxStatus status) {
-        this.status = status;
-    }
-
-    public Instant getAvailableAt() {
-        return availableAt;
-    }
-
-    public void setAvailableAt(Instant availableAt) {
-        this.availableAt = availableAt;
-    }
-
-    public String getLockedBy() {
-        return lockedBy;
-    }
-
-    public void setLockedBy(String lockedBy) {
-        this.lockedBy = lockedBy;
-    }
-
-    public Instant getLockExpiresAt() {
-        return lockExpiresAt;
-    }
-
-    public void setLockExpiresAt(Instant lockExpiresAt) {
-        this.lockExpiresAt = lockExpiresAt;
-    }
-
-    public int getPublishAttempts() {
-        return publishAttempts;
-    }
-
-    public void setPublishAttempts(int publishAttempts) {
-        this.publishAttempts = publishAttempts;
-    }
-
-    public String getLastError() {
-        return lastError;
-    }
-
-    public void setLastError(String lastError) {
-        this.lastError = lastError;
-    }
-
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
-
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
-    }
-
-    public Instant getPublishedAt() {
-        return publishedAt;
-    }
-
-    public void setPublishedAt(Instant publishedAt) {
-        this.publishedAt = publishedAt;
-    }
 }
