@@ -15,7 +15,8 @@ public record JobPipelineProperties(
         @DefaultValue @Valid Topics topics,
         @DefaultValue @Valid Consumer consumer,
         @DefaultValue @Valid Outbox outbox,
-        @DefaultValue @Valid Worker worker) {
+        @DefaultValue @Valid Worker worker,
+        @DefaultValue @Valid Schedules schedules) {
 
     public record Defaults(@DefaultValue("10000") @Min(10) long timeoutMs) {
     }
@@ -60,5 +61,10 @@ public record JobPipelineProperties(
             @DefaultValue("2000") @Min(100) long heartbeatIntervalMs,
             @DefaultValue("2000") @Min(50) long staleRecoveryIntervalMs,
             @DefaultValue("25") @Min(1) int staleRecoveryBatchSize) {
+    }
+
+    public record Schedules(
+            @DefaultValue("1000") @Min(50) long pollIntervalMs,
+            @DefaultValue("100") @Min(1) int batchSize) {
     }
 }
