@@ -206,35 +206,6 @@ class DistributedPipelineIntegrationTest {
                 .contains("echo", "report.generate", "simulate", "sum");
         assertThat(jobRepository.count()).isEqualTo(jobsBefore);
 
-        // Payloads the handler would refuse -> 400 with one field error per problem; nothing is persisted
-        ResponseEntity<ApiErrorResponse> echoWithoutMessage = restTemplate.postForEntity("/api/v1/jobs",
-                Map.of("jobType", "echo", "payload", Map.of("msg", "typo")), ApiErrorResponse.class);
-        assertThat(echoWithoutMessage.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(echoWithoutMessage.getBody().message()).isEqualTo("Validation failed");
-        assertThat(echoWithoutMessage.getBody().fieldErrors())
-                .containsExactly(Map.entry("payload.message", "must be a non-blank string"));
-
-        ResponseEntity<ApiErrorResponse> badSum = restTemplate.postForEntity("/api/v1/jobs",
-                Map.of("jobType", "sum", "payload", Map.of("numbers", List.of(1, "two", 3, true))),
-                ApiErrorResponse.class);
-        assertThat(badSum.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(badSum.getBody().fieldErrors()).containsOnly(
-                Map.entry("payload.numbers[1]", "must be a number, got: \"two\""),
-                Map.entry("payload.numbers[3]", "must be a number, got: true"));
-
-        ResponseEntity<ApiErrorResponse> badReport = restTemplate.postForEntity("/api/v1/jobs",
-                Map.of("jobType", "report.generate", "payload", Map.of("rows", -5, "simulateFailures", "lots")),
-                ApiErrorResponse.class);
-        assertThat(badReport.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
-        assertThat(badReport.getBody().fieldErrors()).containsOnly(
-                Map.entry("payload.reportName", "must be a non-blank string"),
-                Map.entry("payload.rows", "must be a non-negative integer"),
-                Map.entry("payload.simulateFailures", "must be a non-negative integer"));
-
-        ResponseEntity<String> arrayPayloadBody = postRaw("{\"jobType\":\"echo\",\"payload\":[1]}");
-        assertThat(arrayPayloadBody.getBody()).contains("\"payload\":\"payload must be a JSON object\"");
-        assertThat(jobRepository.count()).isEqualTo(jobsBefore);
-
         // Surrounding whitespace is tolerated, as the stored jobType is trimmed
         assertThat(postRaw("{\"jobType\":\" echo \",\"payload\":{\"message\":\"trim-" + UUID.randomUUID() + "\"}}")
                 .getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
@@ -443,13 +414,12 @@ class DistributedPipelineIntegrationTest {
 
     @Test
     void nonRetryableFailureBypassesRetriesRoutesImmediatelyToDlqAndSupportsReplay() {
-        // Non-retryable payload error with maxRetries=5 must fail on attempt 1 with zero retries. Submission rejects
-        // payloads a handler can detect up front, so this one only fails at execution.
+        // Non-retryable payload error with maxRetries=5 must fail on attempt 1 with zero retries
         ResponseEntity<JobAcceptedResponse> badJobResp = postJob(Map.of(
                 "jobType", "sum",
                 "priority", "HIGH",
                 "maxRetries", 5,
-                "payload", Map.of("numbers", List.of(1, 2), "simulateInvalid", true)));
+                "payload", Map.of("numbers", List.of("not-a-number"))));
         String badJobId = badJobResp.getBody().jobId();
 
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {

@@ -3,6 +3,7 @@ package com.example.jobs.service;
 import com.example.jobs.domain.JobEntity;
 import com.example.jobs.domain.JobScheduleEntity;
 import com.example.jobs.exception.JobStateConflictException;
+import com.example.jobs.exception.RequestValidationException;
 import com.example.jobs.exception.ScheduleNotFoundException;
 import com.example.jobs.repository.JobScheduleRepository;
 import com.example.jobs.web.dto.CreateJobRequest;
@@ -51,7 +52,10 @@ public class ScheduleService {
     @Transactional
     public ScheduleResponse create(CreateScheduleRequest request) {
         CreateJobRequest job = request.job();
-        jobHandlerRegistry.validate("job.", job.jobType(), job.payload());
+        jobHandlerRegistry.requireSupported("job.jobType", job.jobType());
+        if (job.payload() == null || !job.payload().isObject()) {
+            throw new RequestValidationException("job.payload", "job.payload must be a JSON object");
+        }
         if (job.scheduledAt() != null || job.delayMs() != null || job.idempotencyKey() != null) {
             throw new IllegalArgumentException("scheduledAt, delayMs and idempotencyKey are not allowed in a schedule's job");
         }

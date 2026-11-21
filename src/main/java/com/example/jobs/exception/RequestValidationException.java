@@ -8,12 +8,8 @@ public class RequestValidationException extends RuntimeException {
     private final Map<String, String> fieldErrors;
 
     public RequestValidationException(String field, String message) {
-        this(Map.of(field, message));
-    }
-
-    public RequestValidationException(Map<String, String> fieldErrors) {
-        super(String.join("; ", fieldErrors.values()));
-        this.fieldErrors = Map.copyOf(fieldErrors);
+        super(message);
+        this.fieldErrors = Map.of(field, message);
     }
 
     public Map<String, String> fieldErrors() {

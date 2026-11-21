@@ -9,8 +9,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -28,24 +26,15 @@ public class ReportGenerationJobHandler implements JobHandler {
     }
 
     @Override
-    public Map<String, String> validatePayload(JsonNode payload) {
-        Map<String, String> errors = new LinkedHashMap<>();
-        JsonNode reportName = payload.get("reportName");
-        if (reportName == null || !reportName.isTextual() || reportName.asText().isBlank()) {
-            errors.put("reportName", "must be a non-blank string");
-        }
-        JsonNode rows = payload.get("rows");
-        if (rows != null && !(rows.isInt() && rows.asInt() >= 0)) {
-            errors.put("rows", "must be a non-negative integer");
-        }
-        return errors;
-    }
-
-    @Override
     public JsonNode execute(JobExecutionContext context) throws Exception {
-        InvalidPayloadException.throwIfAny(validatePayload(context.payload()));
-        String reportName = context.payload().get("reportName").asText();
+        String reportName = context.payload().path("reportName").asText("");
+        if (reportName.isBlank()) {
+            throw new InvalidPayloadException("report.generate job requires a non-blank 'reportName' field");
+        }
         int rows = context.payload().path("rows").asInt(100);
+        if (rows < 0) {
+            throw new InvalidPayloadException("'rows' must be >= 0");
+        }
 
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         byte[] hash = digest.digest((reportName + ":" + rows).getBytes(StandardCharsets.UTF_8));

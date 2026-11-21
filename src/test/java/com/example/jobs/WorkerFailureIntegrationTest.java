@@ -161,7 +161,7 @@ class WorkerFailureIntegrationTest {
                 job("simulate", Map.of("simulateDelayMs", 10_000), 1, 100),
                 JobStatus.DEAD_LETTERED, 2, "JobAttemptTimeoutException", AttemptStatus.TIMED_OUT));
         scenarios.put("non-retryable skips retries", new Scenario(
-                job("sum", Map.of("numbers", List.of(1), "simulateInvalid", true), 5, 2000),
+                job("sum", Map.of("numbers", List.of("x")), 5, 2000),
                 JobStatus.DEAD_LETTERED, 1, "InvalidPayloadException", AttemptStatus.FAILED));
         scenarios.put("terminal failure bypasses the DLQ", new Scenario(
                 job("simulate", Map.of("simulateTerminalFailure", true), 4, 2000),

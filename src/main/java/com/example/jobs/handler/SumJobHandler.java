@@ -6,8 +6,6 @@ import com.example.jobs.worker.JobHandler;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -25,24 +23,11 @@ public class SumJobHandler implements JobHandler {
     }
 
     @Override
-    public Map<String, String> validatePayload(JsonNode payload) {
-        JsonNode numbers = payload.get("numbers");
-        if (numbers == null || !numbers.isArray() || numbers.isEmpty()) {
-            return Map.of("numbers", "must be a non-empty array of numbers");
-        }
-        Map<String, String> errors = new LinkedHashMap<>();
-        for (int i = 0; i < numbers.size(); i++) {
-            if (!numbers.get(i).isNumber()) {
-                errors.put("numbers[" + i + "]", "must be a number, got: " + numbers.get(i));
-            }
-        }
-        return errors;
-    }
-
-    @Override
     public JsonNode execute(JobExecutionContext context) {
-        InvalidPayloadException.throwIfAny(validatePayload(context.payload()));
         JsonNode numbers = context.payload().get("numbers");
+        if (numbers == null || !numbers.isArray() || numbers.isEmpty()) {
+            throw new InvalidPayloadException("sum job requires a non-empty numeric 'numbers' array in payload");
+        }
 
         double sum = 0.0;
         double min = Double.POSITIVE_INFINITY;
@@ -50,6 +35,9 @@ public class SumJobHandler implements JobHandler {
         int count = 0;
 
         for (JsonNode element : numbers) {
+            if (element == null || !element.isNumber()) {
+                throw new InvalidPayloadException("All elements in 'numbers' must be numeric, got: " + element);
+            }
             double value = element.doubleValue();
             sum += value;
             min = Math.min(min, value);
