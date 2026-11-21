@@ -1,0 +1,56 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:jobsdb;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${spring.embedded.kafka.brokers}
+    consumer:
+      group-id: async-job-workers-test
+      auto-offset-reset: earliest
+
+app:
+  jobs:
+    worker-id: test-worker-1
+    defaults:
+      max-retries: 3
+      timeout-ms: 2000
+    topics:
+      high: jobs.high
+      normal: jobs.normal
+      low: jobs.low
+      dlq: jobs.dlq
+      partitions:
+        high: 3
+        normal: 2
+        low: 1
+        dlq: 2
+      replication-factor: 1
+    consumer:
+      high-concurrency: 3
+      normal-concurrency: 2
+      low-concurrency: 1
+      dlq-concurrency: 1
+    retry:
+      base-interval-ms: 120
+      multiplier: 2.0
+      max-interval-ms: 1500
+      jitter-factor: 0.25
+    outbox:
+      poll-interval-ms: 40
+      batch-size: 50
+      lock-duration-ms: 5000
+      send-timeout-ms: 5000
+    worker:
+      executor-pool-size: 12
+      lease-grace-ms: 500
+      heartbeat-interval-ms: 200
+      stale-recovery-interval-ms: 200
+      stale-recovery-batch-size: 20
