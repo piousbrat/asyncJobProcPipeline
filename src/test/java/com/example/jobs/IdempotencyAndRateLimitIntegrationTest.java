@@ -6,6 +6,7 @@ import com.example.jobs.repository.JobRepository;
 import com.example.jobs.repository.OutboxEventRepository;
 import com.example.jobs.web.dto.ApiErrorResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,7 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.test.annotation.DirtiesContext;
@@ -33,7 +35,8 @@ import org.springframework.test.context.ActiveProfiles;
         properties = {
                 "app.jobs.rate-limit.limit=10",
                 "app.jobs.rate-limit.window-ms=3000",
-                "app.jobs.idempotency.await-ms=300"
+                "app.jobs.idempotency.await-ms=300",
+                "app.jobs.idempotency.fingerprint-window-ms=2000"
         })
 @EmbeddedKafka(partitions = 3, topics = {"jobs.high", "jobs.normal", "jobs.low", "jobs.dlq"})
 @ActiveProfiles("test")
@@ -51,6 +54,9 @@ class IdempotencyAndRateLimitIntegrationTest {
 
     @Autowired
     private OutboxEventRepository outboxEventRepository;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Test
     void duplicateIsAnsweredFromRedisWithoutReadingTheDatabase() {
@@ -102,6 +108,60 @@ class IdempotencyAndRateLimitIntegrationTest {
     }
 
     @Test
+    void withoutAKeyIdenticalRequestsFromOneClientCollapseWithinTheFingerprintWindow() throws Exception {
+        String client = newClient();
+        String tag = UUID.randomUUID().toString();
+        JobAcceptedResponse first = submitRaw(client, null,
+                "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"m\",\"tag\":\"" + tag + "\"}}");
+        assertThat(first.deduplicated()).isFalse();
+        assertThat(first.idempotencyKey()).startsWith("fp:");
+
+        // Same request with payload keys reordered: same fingerprint.
+        JobAcceptedResponse retry = submitRaw(client, null,
+                "{\"payload\":{\"tag\":\"" + tag + "\",\"message\":\"m\"},\"delayMs\":60000,\"jobType\":\"echo\"}");
+        assertThat(retry.jobId()).isEqualTo(first.jobId());
+        assertThat(retry.deduplicated()).isTrue();
+
+        String body = "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"m\",\"tag\":\"" + tag + "\"}}";
+        assertThat(submitRaw(newClient(), null, body).jobId()).isNotEqualTo(first.jobId());
+        assertThat(submitRaw(client, null, body.replace("\"m\"", "\"other\"")).jobId()).isNotEqualTo(first.jobId());
+
+        Thread.sleep(2_100);
+        JobAcceptedResponse afterWindow = submitRaw(client, null, body);
+        assertThat(afterWindow.deduplicated()).isFalse();
+        assertThat(afterWindow.jobId()).isNotEqualTo(first.jobId());
+    }
+
+    @Test
+    void eventIdDeduplicatesPerClientAndFallsBackToTheDatabaseWhenRedisLosesTheKey() {
+        String client = newClient();
+        String eventId = "evt-" + UUID.randomUUID();
+        JobAcceptedResponse first = submitRaw(client, eventId,
+                "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"v1\"}}");
+        assertThat(first.idempotencyKey()).startsWith("evt:");
+
+        // The event id is the identity: a redelivered event is the same job even if the body differs.
+        JobAcceptedResponse redelivered = submitRaw(client, eventId,
+                "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"v2\"}}");
+        assertThat(redelivered.jobId()).isEqualTo(first.jobId());
+        assertThat(redelivered.deduplicated()).isTrue();
+
+        assertThat(submitRaw(newClient(), eventId,
+                "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"v1\"}}").jobId())
+                .isNotEqualTo(first.jobId());
+
+        double dbDedupBefore = meterRegistry.counter("jobs.submissions.deduplicated",
+                "source", "database", "key", "event").count();
+        redis.delete("jobs:idem:" + first.idempotencyKey());
+        JobAcceptedResponse afterRedisLoss = submitRaw(client, eventId,
+                "{\"jobType\":\"echo\",\"delayMs\":60000,\"payload\":{\"message\":\"v1\"}}");
+        assertThat(afterRedisLoss.jobId()).isEqualTo(first.jobId());
+        assertThat(afterRedisLoss.deduplicated()).isTrue();
+        assertThat(meterRegistry.counter("jobs.submissions.deduplicated", "source", "database", "key", "event").count())
+                .isEqualTo(dbDedupBefore + 1);
+    }
+
+    @Test
     void eachClientGetsTenRequestsPerThreeSecondsAcrossConcurrentCalls() throws Exception {
         String client = newClient();
         int callers = 30;
@@ -147,6 +207,18 @@ class IdempotencyAndRateLimitIntegrationTest {
     private ResponseEntity<JobAcceptedResponse> submit(String client, String key) {
         return restTemplate.exchange("/api/v1/jobs", HttpMethod.POST, new HttpEntity<>(job(key), headers(client)),
                 JobAcceptedResponse.class);
+    }
+
+    private JobAcceptedResponse submitRaw(String client, String eventId, String json) {
+        HttpHeaders headers = headers(client);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (eventId != null) {
+            headers.set("X-Event-Id", eventId);
+        }
+        ResponseEntity<JobAcceptedResponse> response = restTemplate.exchange("/api/v1/jobs", HttpMethod.POST,
+                new HttpEntity<>(json, headers), JobAcceptedResponse.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        return response.getBody();
     }
 
     private Map<String, Object> job(String key) {

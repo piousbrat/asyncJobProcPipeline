@@ -9,6 +9,7 @@ import com.example.jobs.outbox.OutboxRelayScheduler;
 import com.example.jobs.repository.DeadLetterRecordRepository;
 import com.example.jobs.repository.JobAttemptRepository;
 import com.example.jobs.repository.JobRepository;
+import com.example.jobs.service.IdempotencyKeyResolver.ResolvedKey;
 import com.example.jobs.web.dto.CreateJobRequest;
 import com.example.jobs.web.dto.DeadLetterJobResponse;
 import com.example.jobs.web.dto.JobAcceptedResponse;
@@ -16,6 +17,7 @@ import com.example.jobs.web.dto.JobStatusResponse;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +38,8 @@ public class JobService {
     private final JobWriteTxService jobWriteTxService;
     private final OutboxRelayScheduler outboxRelayScheduler;
     private final IdempotencyCache idempotencyCache;
+    private final IdempotencyKeyResolver keyResolver;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper;
 
     public JobService(
@@ -45,6 +49,8 @@ public class JobService {
             JobWriteTxService jobWriteTxService,
             OutboxRelayScheduler outboxRelayScheduler,
             IdempotencyCache idempotencyCache,
+            IdempotencyKeyResolver keyResolver,
+            MeterRegistry meterRegistry,
             ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.jobAttemptRepository = jobAttemptRepository;
@@ -52,44 +58,48 @@ public class JobService {
         this.jobWriteTxService = jobWriteTxService;
         this.outboxRelayScheduler = outboxRelayScheduler;
         this.idempotencyCache = idempotencyCache;
+        this.keyResolver = keyResolver;
+        this.meterRegistry = meterRegistry;
         this.objectMapper = objectMapper;
     }
 
-    public JobAcceptedResponse submitJob(CreateJobRequest request) {
+    public JobAcceptedResponse submitJob(CreateJobRequest request, String clientId, String eventId) {
         validateSubmission(request);
 
-        String normalizedKey = normalizeIdempotencyKey(request.idempotencyKey());
+        Instant now = Instant.now();
+        ResolvedKey key = keyResolver.resolve(request, clientId, eventId, now);
         String claimToken = UUID.randomUUID().toString();
-        if (normalizedKey != null) {
-            Optional<JobAcceptedResponse> existing = idempotencyCache.claimOrGetExisting(normalizedKey, claimToken);
+        if (key != null) {
+            Optional<JobAcceptedResponse> existing = idempotencyCache.claimOrGetExisting(key.cacheKey(), claimToken);
             if (existing.isPresent()) {
+                countDeduplicated("redis", key);
                 return existing.get();
             }
         }
 
-        Instant now = Instant.now();
         Instant scheduledFor = resolveScheduledTime(request, now);
+        String dbKey = key != null ? key.dbKey() : null;
 
         JobAcceptedResponse response;
         try {
             response = toAcceptedResponse(
-                    jobWriteTxService.insertJobAndOutbox(request, normalizedKey, now, scheduledFor), false);
+                    jobWriteTxService.insertJobAndOutbox(request, dbKey, now, scheduledFor), false);
         } catch (DataIntegrityViolationException ex) {
             // Redis lost the key (eviction, failover, outage): the DB constraint is the source of truth.
-            Optional<JobEntity> winner = normalizedKey != null
-                    ? jobRepository.findByIdempotencyKey(normalizedKey) : Optional.empty();
+            Optional<JobEntity> winner = dbKey != null ? jobRepository.findByIdempotencyKey(dbKey) : Optional.empty();
             if (winner.isEmpty()) {
-                releaseClaim(normalizedKey, claimToken);
+                releaseClaim(key, claimToken);
                 throw ex;
             }
+            countDeduplicated("database", key);
             response = toAcceptedResponse(winner.get(), true);
         } catch (RuntimeException ex) {
-            releaseClaim(normalizedKey, claimToken);
+            releaseClaim(key, claimToken);
             throw ex;
         }
 
-        if (normalizedKey != null) {
-            idempotencyCache.complete(normalizedKey, response);
+        if (key != null) {
+            idempotencyCache.complete(key.cacheKey(), response, key.cacheTtlMs());
         }
         if (!response.deduplicated() && !scheduledFor.isAfter(now)) {
             outboxRelayScheduler.triggerImmediateFlush();
@@ -97,10 +107,15 @@ public class JobService {
         return response;
     }
 
-    private void releaseClaim(String key, String claimToken) {
+    private void releaseClaim(ResolvedKey key, String claimToken) {
         if (key != null) {
-            idempotencyCache.release(key, claimToken);
+            idempotencyCache.release(key.cacheKey(), claimToken);
         }
+    }
+
+    private void countDeduplicated(String source, ResolvedKey key) {
+        meterRegistry.counter("jobs.submissions.deduplicated",
+                "source", source, "key", key.source().name().toLowerCase()).increment();
     }
 
     @Transactional(readOnly = true)
@@ -151,14 +166,6 @@ public class JobService {
             return now.plusMillis(request.delayMs());
         }
         return now;
-    }
-
-    private String normalizeIdempotencyKey(String key) {
-        if (key == null) {
-            return null;
-        }
-        String trimmed = key.trim();
-        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private JobAcceptedResponse toAcceptedResponse(JobEntity job, boolean deduplicated) {

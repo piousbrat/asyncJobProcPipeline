@@ -75,10 +75,9 @@ public class IdempotencyCache {
         }
     }
 
-    public void complete(String key, JobAcceptedResponse response) {
+    public void complete(String key, JobAcceptedResponse response, long ttlMs) {
         try {
-            redis.opsForValue().set(PREFIX + key, objectMapper.writeValueAsString(response),
-                    Duration.ofMillis(config.ttlMs()));
+            redis.opsForValue().set(PREFIX + key, objectMapper.writeValueAsString(response), Duration.ofMillis(ttlMs));
         } catch (DataAccessException | JsonProcessingException ex) {
             log.warn("Could not cache idempotent response for key {}: {}", key, ex.getMessage());
         }

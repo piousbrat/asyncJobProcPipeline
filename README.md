@@ -58,7 +58,7 @@ A production-grade, horizontally scalable asynchronous job processing pipeline b
 
 1. **Decoupled, Crash-Safe Submission (Transactional Outbox)**:
    - `POST /api/v1/jobs` validates input, writes the `jobs` row (`QUEUED`) and an `outbox_events` row (`PENDING`, `available_at = scheduledFor`) inside a **single database transaction**, and returns `202 Accepted` immediately without blocking on Kafka broker round-trips.
-   - Optional `idempotencyKey` is enforced via a database `UNIQUE` constraint plus `REQUIRES_NEW` conflict recovery so concurrent duplicate submissions return `202 Accepted` with `"deduplicated": true` and never create duplicate jobs.
+   - Every submission gets an idempotency key (explicit `idempotencyKey`, `X-Event-Id`, or a per-client request fingerprint). Duplicates are answered from Redis with `"deduplicated": true`, and the database `UNIQUE` constraint is the backstop when Redis is unavailable (see [Delivery Guarantees & Duplicate Execution](#delivery-guarantees--duplicate-execution)).
 
 2. **Zero Double-Dispatch Across Replicas (`FOR UPDATE SKIP LOCKED`)**:
    - `OutboxRelayScheduler` claims due outbox batches (`available_at <= now`) using `SELECT ... FOR UPDATE SKIP LOCKED` ordered by `priority_rank ASC, available_at ASC`.
@@ -125,36 +125,102 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 
 | Layer | Mechanism |
 | --- | --- |
-| Submission | Redis first, database as backstop (see below). Repeats, even concurrent ones, return `202` with the original `jobId` and `"deduplicated": true`. |
+| Submission | Every request gets an idempotency key (explicit, `X-Event-Id`, or a request fingerprint), checked in Redis first with the database as backstop (see below). Repeats, even concurrent ones, return `202` with the original `jobId` and `"deduplicated": true`. |
 | Dispatch | Kafka is at-least-once. A worker only runs a message if the conditional claim (`status = QUEUED AND attempt_count = expectedAttempt-1 AND replay_count = ...`) succeeds, so duplicate/stale messages are ignored. |
 | Completion | Result/failure writes are fenced by `leaseToken`, so a zombie worker cannot overwrite a recovered attempt. |
 | DLQ | Dead-letter records are unique per outbox event id; redelivery is a no-op. |
 
-## Delivery Guarantees
+## Delivery Guarantees & Duplicate Execution
 
-**At-least-once execution is guaranteed for every accepted job (`202`); exactly-once is not.** Handlers must be idempotent.
+**Every accepted job (`202`) is executed at least once, or ends in a visible terminal state (`DEAD_LETTERED` / `FAILED`)
+after its retry budget. Exactly-once execution is not guaranteed.** State transitions are exactly-once, because claim and
+completion are fenced by compare-and-set and `leaseToken`. Handler side effects are at-least-once, with a hard upper
+bound (below).
 
-| Hop | Why nothing is lost | Where duplicates can appear |
+### Where at-least-once is guaranteed
+
+| Stage | Mechanism | Why the job is not lost |
 | --- | --- | --- |
-| API -> DB/outbox | Job row and outbox row are written in one transaction; a `202` means both are durable. | Client retries are collapsed by `idempotencyKey`. |
-| Outbox -> Kafka | The relay marks a row published only after the broker acks; a crash in between re-publishes it. | Re-publish after a crash. Stale copies fail the conditional claim and are ignored. |
-| Kafka -> worker | The offset is committed only after the claim attempt. Infrastructure errors (e.g. DB down while claiming) are retried in place indefinitely, never skipped. | Redelivery after a rebalance. Ignored by the claim. |
-| Worker crash / hang | The lease expires and `StaleJobRecoveryScheduler` re-queues the job. | **The handler may run twice** if the first run did its side effects but crashed before recording the result, or if a zombie worker outlives its lease (its result is fenced out, its side effects are not). |
-| Retries exhausted | The job moves to `DEAD_LETTERED` (or `FAILED`), never silently dropped. | DLQ records are unique per event id. |
+| Submission | Job row and outbox row commit in one transaction before `202` is returned. | A `202` means the job is durable in PostgreSQL. |
+| Outbox -> Kafka | A row is marked `PUBLISHED` only after the broker acks (`acks=all`, idempotent producer). Failed publishes retry with capped backoff, indefinitely. | A relay crash between send and mark re-publishes the row. |
+| Kafka -> worker | Offsets are committed only after the claim attempt. Infrastructure errors (e.g. DB down while claiming) retry in place indefinitely. | A message is never skipped because of a transient error. |
+| Execution | Lease plus heartbeat. `StaleJobRecoveryScheduler` re-queues `RUNNING` jobs whose lease expired. | A worker crash or hang turns into a retry, not a stuck job. |
+| Retry | The next attempt is a durable outbox row with `available_at = nextRetryAt`. | Retries survive restarts. |
+| Terminal failure | A DLQ outbox row is published to `jobs.dlq`, then the job is `DEAD_LETTERED`. Replay is available via `/api/v1/dlq/{id}/replay`. | Failures are parked visibly, never dropped. |
+| Recurring | The fire and the job insert are one transaction under a row lock. | A fire time is never lost between "fired" and "job created". |
 
-So the *state transition* is effectively exactly-once (claim and completion are fenced by CAS and `leaseToken`), while *handler side effects* are at-least-once. Make handlers idempotent, e.g. key external writes on `jobId`.
+### Where it is NOT guaranteed
 
-### Idempotency keys (Redis, no database read)
+- **Before `202`.** A timeout, connection drop, `5xx`, `429` (rate limited) or `409` (key still in flight) means no job
+  may exist. The client must retry. Retrying with the same `idempotencyKey` or `X-Event-Id` is always safe.
+- **Retry budget exhausted.** At-least-once means at least one attempt, not success. After `maxRetries` (default 3)
+  the job is `DEAD_LETTERED` (or `FAILED` for `TerminalJobFailureException` / `routeToDlq=false`) and needs a manual replay.
+- **A worker dies with `maxRetries=0`.** The lease-expired attempt counts as the only attempt, so the job goes to the DLQ
+  even though the handler may have run partially or not at all.
+- **Deliberate cancellation.** Ops `cancel` / `drain` turn `QUEUED` jobs into `FAILED` (`JobCancelled`).
+- **Missed recurring fires.** While all replicas are down, missed fires coalesce into one catch-up run, by design.
+- **Durability of the stores.** PostgreSQL is the source of truth: losing committed rows (for example, failover to an
+  async replica) loses jobs. A dispatch message lost **inside Kafka after it was acked** (replication factor 1 with a
+  lost disk, or a consumer group down longer than topic retention) leaves the job `QUEUED` with no message, because its
+  outbox row is already `PUBLISHED`. Run Kafka with replication factor 3 and `min.insync.replicas=2`, and alert on the
+  `ready` count in `GET /api/v1/ops/queue` growing while workers are idle.
+- **Redis is not part of the guarantee.** If it is down, the rate limiter fails open and fingerprint dedup weakens
+  (see below), but no job is lost.
+
+### Where duplicates come from, and how each is bounded or detected
+
+| Source | Outcome | How it is detected |
+| --- | --- | --- |
+| Client retry or double submit | Collapsed into one job by the idempotency key (explicit, event or fingerprint; see below). | Response `"deduplicated": true`; `jobs.submissions.deduplicated{source=redis\|database,key=explicit\|event\|fingerprint}` |
+| Outbox re-publish, Kafka redelivery or rebalance | **Never executes.** The claim requires `status=QUEUED AND attempt_count=expected-1 AND replay_count=...`. | `jobs.dispatch.duplicates_skipped{reason=stale\|lost_race\|unknown_job}` |
+| Worker crashed after side effects but before commit | Re-executed as the next attempt, which uses up retry budget. | Attempt row `TIMED_OUT` "Worker lease expired"; `jobs.lease.recovered`; the handler sees `attemptNumber > 1` |
+| Zombie worker (GC pause or network partition outlives the lease) | May run **concurrently** with the next attempt. Its result is rejected by the `leaseToken` check. | Attempt row error message gets "late SUCCEEDED/FAILED result discarded ... (possible duplicate execution)"; `jobs.execution.fenced{outcome}` |
+| Handler ignores the timeout interrupt | Keeps running while the retry runs. Its result is discarded. | `jobs.execution.completed_after_timeout` plus a WARN log naming the job and attempt |
+| DLQ replay | Operator-initiated new run. | `replayCount` on the job and `replayGeneration` on each attempt |
+
+Duplicate executions are **bounded**. A handler runs only after a successful claim, and every claim increments
+`attempt_count` under compare-and-set, capped at `maxRetries + 1`. So per job:
+
+    handler executions <= (maxRetries + 1) x (1 + number of DLQ replays)     # 4 with the defaults
+
+Kafka and outbox duplicates never count against this bound, because they never pass the claim. Concurrent overlap is only
+possible in the zombie and ignored-timeout cases, and is bounded by the same number (and by the worker thread pool).
+
+**Making handlers safe:** use `context.jobId()` as the idempotency key for external calls and writes (it is stable across
+attempts). Treat `context.attemptNumber() > 1` as "a previous attempt may have partially run". Keep I/O interruptible so
+timeouts actually stop work. All counters are exposed at `/actuator/metrics/<name>`.
+
+### Idempotency keys (Redis first, database as backstop)
+
+Every submission gets a key, so retries are safe even when the client sends none:
+
+| Priority | Key | Cached in Redis | Stored in `jobs.idempotency_key` |
+| --- | --- | --- | --- |
+| 1 | `idempotencyKey` in the body, as-is | `ttl-ms` (24h) | the key (unique forever) |
+| 2 | `X-Event-Id` header: `evt:sha256(client, eventId)` | `ttl-ms` (24h) | same (unique forever) |
+| 3 | Neither: `fp:sha256(client, canonical request body)` | `fingerprint-window-ms` (10 min) from the first submission | `fp:...:<epochMs / window>` |
+
+- The client is `X-Client-Id`, or the remote IP if that header is absent. The fingerprint covers every request field,
+  with JSON keys sorted, so field order doesn't matter.
+- An event id is the event's identity, so a redelivered event is the same job even if its body changed. It is scoped
+  per client.
+- Fingerprinting collapses **identical** requests from one client within the window. To submit the same job twice on
+  purpose, send distinct `idempotencyKey`s. Set `fingerprint-window-ms: 0` to disable fingerprinting.
+  Clients sharing an IP without `X-Client-Id` share fingerprints.
+
+The submission flow:
 
 1. The first request claims `jobs:idem:<key>` with `SET NX` as a short `PENDING` marker (`pending-ttl-ms`, 30s).
-2. The job is inserted, then the marker is replaced with the accepted response JSON for `ttl-ms` (24h).
+2. The job is inserted, then the marker is replaced with the accepted response JSON.
 3. A duplicate gets that cached response straight from Redis, with no database query. If the original is still in
    flight, the duplicate waits up to `await-ms` (2s) for it, then gets `409` and should retry.
 4. If inserting the job fails, the claim is released (compare-and-delete), so the client can retry right away.
 
-Redis speeds this up but is not the source of truth. If Redis is down, evicted the key, or failed over, the
-`UNIQUE(idempotency_key)` constraint rejects the duplicate insert. The original job is then read from the database
-(the only database read, and only in that case) and written back to Redis.
+**When Redis fails** (down, evicted the key, or failed over), the database takes over. The `UNIQUE(idempotency_key)`
+constraint rejects the duplicate insert, and the original job is read back and re-cached. That is the only database read,
+and only on this path. Explicit and event keys stay fully deduplicated. Fingerprints are deduplicated only within the
+same window bucket, so while Redis is down a retry that crosses a bucket boundary creates **at most one extra job per
+boundary crossed**. With a 10-minute window, a retry 5 seconds later crosses one about 1% of the time.
 
 ### Rate limiting (10 requests per 3 seconds per client)
 
@@ -172,7 +238,7 @@ Unlike a fixed window, a client can never fit 20 requests across a window bounda
 ```bash
 for i in $(seq 1 11); do
   curl -s -o /dev/null -w "%{http_code} " -X POST localhost:8080/api/v1/jobs -H "X-Client-Id: demo" \
-    -H "Content-Type: application/json" -d '{"jobType":"echo","payload":{"message":"hi"}}'
+    -H "Content-Type: application/json" -d "{\"jobType\":\"echo\",\"payload\":{\"n\":$i}}"
 done   # 202 x10, then 429
 ```
 
@@ -246,6 +312,7 @@ curl -s -X POST localhost:8080/api/v1/schedules/<id>/pause
 | `app.jobs.schedules.batch-size` | `100` | Max due schedules fired per poll per replica |
 | `spring.data.redis.host` / `port` | `localhost` / `6379` (`REDIS_HOST` / `REDIS_PORT`) | Redis for idempotency and rate limiting (250ms command timeout) |
 | `app.jobs.idempotency.ttl-ms` / `pending-ttl-ms` / `await-ms` | `86400000` / `30000` / `2000` | Cached response lifetime / in-flight claim lifetime / how long a duplicate waits for the in-flight original |
+| `app.jobs.idempotency.fingerprint-window-ms` | `600000` | Dedup window for requests without a key or event id (`0` disables) |
 | `app.jobs.rate-limit.enabled` / `limit` / `window-ms` | `true` / `10` / `3000` | Per-client sliding-window limit |
 
 ---

@@ -15,6 +15,8 @@ import com.example.jobs.worker.JobHandler;
 import com.example.jobs.worker.WorkerStateTxService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -81,6 +83,18 @@ class WorkerFailureIntegrationTest {
             });
         }
 
+        /** Busy-waits ignoring interruption, like a handler stuck in non-interruptible I/O. */
+        @Bean
+        JobHandler stubbornHandler(ObjectMapper mapper) {
+            return handler("stubborn", mapper, (ctx, out) -> {
+                long until = System.nanoTime() + ctx.payload().path("workMs").asLong() * 1_000_000;
+                while (System.nanoTime() < until) {
+                    Thread.onSpinWait();
+                }
+                out.put("done", true);
+            });
+        }
+
         private static JobHandler handler(String type, ObjectMapper mapper, Body body) {
             return new JobHandler() {
                 @Override
@@ -118,6 +132,9 @@ class WorkerFailureIntegrationTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Test
     void mixedWorkerFailuresConvergeToExpectedFinalStatesAndOnlyDeadLetteredJobsReachTheDlq() {
@@ -210,6 +227,8 @@ class WorkerFailureIntegrationTest {
         String recoverable = post(delayed(job("echo", Map.of("message", "survivor"), 2, 200))).getBody().jobId();
         String exhausted = post(delayed(job("echo", Map.of("message", "doomed"), 0, 200))).getBody().jobId();
 
+        double recoveredBefore = counter("jobs.lease.recovered");
+        double fencedBefore = counter("jobs.execution.fenced", "outcome", "SUCCEEDED");
         ClaimedJobAttempt zombie = claimAsDeadWorker(recoverable);
         claimAsDeadWorker(exhausted);
         assertThat(getJob(recoverable).state()).isEqualTo(JobStatus.RUNNING);
@@ -240,6 +259,26 @@ class WorkerFailureIntegrationTest {
         JobStatusResponse afterZombie = getJob(recoverable);
         assertThat(afterZombie.state()).isEqualTo(JobStatus.SUCCEEDED);
         assertThat(afterZombie.result().get("echo").asText()).isEqualTo("survivor");
+
+        // The duplicate execution is detectable: per job on the attempt row, and fleet-wide via metrics.
+        assertThat(afterZombie.attempts().get(0).errorMessage())
+                .contains("late SUCCEEDED result discarded", "possible duplicate execution");
+        assertThat(counter("jobs.execution.fenced", "outcome", "SUCCEEDED")).isEqualTo(fencedBefore + 1);
+        assertThat(counter("jobs.lease.recovered")).isGreaterThanOrEqualTo(recoveredBefore + 2);
+    }
+
+    @Test
+    void handlerThatIgnoresTheTimeoutAndFinishesLateIsCounted() {
+        double before = counter("jobs.execution.completed_after_timeout");
+        String jobId = post(job("stubborn", Map.of("workMs", 700, "tag", UUID.randomUUID().toString()), 0, 200))
+                .getBody().jobId();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(getJob(jobId).state()).isEqualTo(JobStatus.DEAD_LETTERED);
+            assertThat(counter("jobs.execution.completed_after_timeout")).isEqualTo(before + 1);
+        });
+        assertThat(getJob(jobId).attempts()).singleElement()
+                .satisfies(a -> assertThat(a.status()).isEqualTo(AttemptStatus.TIMED_OUT));
     }
 
     @Test
@@ -249,6 +288,7 @@ class WorkerFailureIntegrationTest {
         await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(20)).untilAsserted(() ->
                 assertThat(getJob(jobId).state()).isEqualTo(JobStatus.RUNNING));
 
+        double skippedBefore = counter("jobs.dispatch.duplicates_skipped", "reason", "stale");
         String duplicate = objectMapper.writeValueAsString(
                 new JobDispatchEnvelope(jobId, "slow.count", JobPriority.NORMAL, 1, 0, Instant.now()));
         for (int i = 0; i < 5; i++) {
@@ -262,6 +302,7 @@ class WorkerFailureIntegrationTest {
         assertThat(done.attempts()).hasSize(1);
         assertThat(done.result().get("runs").asInt()).isEqualTo(1);
         assertThat(FailureHandlers.RUNS.get(tag).get()).isEqualTo(1);
+        assertThat(counter("jobs.dispatch.duplicates_skipped", "reason", "stale")).isGreaterThanOrEqualTo(skippedBefore + 5);
     }
 
     @Test
@@ -284,6 +325,11 @@ class WorkerFailureIntegrationTest {
         } finally {
             org.mockito.Mockito.reset(workerStateTxService);
         }
+    }
+
+    private double counter(String name, String... tags) {
+        Counter c = meterRegistry.find(name).tags(tags).counter();
+        return c == null ? 0 : c.count();
     }
 
     private ClaimedJobAttempt claimAsDeadWorker(String jobId) {

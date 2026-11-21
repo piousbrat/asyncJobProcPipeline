@@ -15,14 +15,11 @@ import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * Per-client limit on the public API ({@code /api/v1/**} except internal {@code /api/v1/ops/**}).
- * A client is identified by {@code X-Client-Id}, falling back to the remote address; behind a gateway, derive it
- * from the authenticated API key instead, since the header is caller-supplied.
+ * Per-client limit (see {@link ClientIdentity}) on the public API ({@code /api/v1/**} except internal
+ * {@code /api/v1/ops/**}).
  */
 @Component
 public class RateLimitInterceptor implements HandlerInterceptor, WebMvcConfigurer {
-
-    static final String CLIENT_HEADER = "X-Client-Id";
 
     private final RateLimiter rateLimiter;
     private final JobPipelineProperties properties;
@@ -45,7 +42,7 @@ public class RateLimitInterceptor implements HandlerInterceptor, WebMvcConfigure
         if (!properties.rateLimit().enabled()) {
             return true;
         }
-        RateLimiter.Decision decision = rateLimiter.tryAcquire(clientId(request));
+        RateLimiter.Decision decision = rateLimiter.tryAcquire(ClientIdentity.of(request));
         response.setHeader("X-RateLimit-Limit", String.valueOf(decision.limit()));
         response.setHeader("X-RateLimit-Remaining", String.valueOf(decision.remaining()));
         if (decision.allowed()) {
@@ -60,14 +57,5 @@ public class RateLimitInterceptor implements HandlerInterceptor, WebMvcConfigure
                         + " ms exceeded; retry after " + decision.retryAfterMs() + " ms",
                 request.getRequestURI(), Instant.now(), null));
         return false;
-    }
-
-    private static String clientId(HttpServletRequest request) {
-        String header = request.getHeader(CLIENT_HEADER);
-        if (header != null && !header.isBlank()) {
-            String trimmed = header.trim();
-            return "client:" + (trimmed.length() > 128 ? trimmed.substring(0, 128) : trimmed);
-        }
-        return "ip:" + request.getRemoteAddr();
     }
 }
