@@ -301,7 +301,7 @@ class DistributedPipelineIntegrationTest {
             assertThat(mid.lastError()).isNotNull();
             assertThat(mid.lastError().type()).contains("SimulatedTransientFailureException");
             if (mid.state() == JobStatus.QUEUED) {
-                assertThat(mid.nextRetryAt()).isNotNull();
+                assertThat(mid.nextRetryAt()).isNotNull().isBefore(Instant.now().plusMillis(1100));
                 assertThat(mid.result()).isNull();
             }
         });

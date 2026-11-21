@@ -1,8 +1,6 @@
 package com.example.jobs.config;
 
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.DecimalMax;
-import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -16,13 +14,10 @@ public record JobPipelineProperties(
         @DefaultValue @Valid Defaults defaults,
         @DefaultValue @Valid Topics topics,
         @DefaultValue @Valid Consumer consumer,
-        @DefaultValue @Valid Retry retry,
         @DefaultValue @Valid Outbox outbox,
         @DefaultValue @Valid Worker worker) {
 
-    public record Defaults(
-            @DefaultValue("3") @Min(0) int maxRetries,
-            @DefaultValue("10000") @Min(10) long timeoutMs) {
+    public record Defaults(@DefaultValue("10000") @Min(10) long timeoutMs) {
     }
 
     public record Topics(
@@ -49,13 +44,6 @@ public record JobPipelineProperties(
             @DefaultValue("10") @Min(1) int highMaxPollRecords,
             @DefaultValue("5") @Min(1) int normalMaxPollRecords,
             @DefaultValue("2") @Min(1) int lowMaxPollRecords) {
-    }
-
-    public record Retry(
-            @DefaultValue("1000") @Min(1) long baseIntervalMs,
-            @DefaultValue("2.0") @DecimalMin("1.0") double multiplier,
-            @DefaultValue("60000") @Min(1) long maxIntervalMs,
-            @DefaultValue("0.3") @DecimalMin("0.0") @DecimalMax("1.0") double jitterFactor) {
     }
 
     public record Outbox(

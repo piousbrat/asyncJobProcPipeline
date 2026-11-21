@@ -118,8 +118,9 @@ public class KafkaPipelineConfig {
         factory.setConsumerFactory(consumerFactory);
         factory.setConcurrency(concurrency);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
-        // Job retries are scheduled durably via the non-blocking outbox; only brief broker/DB hiccups retry in-container.
-        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(100L, 2L)));
+        // Job retries are scheduled durably via the outbox. This handler only sees infrastructure errors (e.g. the
+        // database is down while claiming), and retries in place until they clear so a dispatch is never skipped.
+        factory.setCommonErrorHandler(new DefaultErrorHandler(new FixedBackOff(1000L, FixedBackOff.UNLIMITED_ATTEMPTS)));
         return factory;
     }
 }

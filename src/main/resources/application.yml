@@ -44,7 +44,6 @@ app:
   jobs:
     worker-id: ${WORKER_ID:${spring.application.name}-${random.uuid}}
     defaults:
-      max-retries: 3
       timeout-ms: 10000
     topics:
       high: jobs.high
@@ -65,11 +64,6 @@ app:
       high-max-poll-records: 10
       normal-max-poll-records: 5
       low-max-poll-records: 2
-    retry:
-      base-interval-ms: 1000
-      multiplier: 2.0
-      max-interval-ms: 60000
-      jitter-factor: 0.3
     outbox:
       poll-interval-ms: 200
       batch-size: 50

@@ -1,6 +1,5 @@
 package com.example.jobs.backoff;
 
-import com.example.jobs.config.JobPipelineProperties;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.DoubleSupplier;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,12 +24,12 @@ public class JitteredExponentialBackoffCalculator {
     private final DoubleSupplier randomSource;
 
     @Autowired
-    public JitteredExponentialBackoffCalculator(JobPipelineProperties properties) {
+    public JitteredExponentialBackoffCalculator() {
         this(
-                properties.retry().baseIntervalMs(),
-                properties.retry().multiplier(),
-                properties.retry().maxIntervalMs(),
-                properties.retry().jitterFactor(),
+                RetryPolicy.BASE_INTERVAL_MS,
+                RetryPolicy.MULTIPLIER,
+                RetryPolicy.MAX_INTERVAL_MS,
+                RetryPolicy.JITTER_FACTOR,
                 () -> ThreadLocalRandom.current().nextDouble());
     }
 

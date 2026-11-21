@@ -20,7 +20,6 @@ app:
   jobs:
     worker-id: test-worker-1
     defaults:
-      max-retries: 3
       timeout-ms: 2000
     topics:
       high: jobs.high
@@ -38,11 +37,6 @@ app:
       normal-concurrency: 2
       low-concurrency: 1
       dlq-concurrency: 1
-    retry:
-      base-interval-ms: 120
-      multiplier: 2.0
-      max-interval-ms: 1500
-      jitter-factor: 0.25
     outbox:
       poll-interval-ms: 40
       batch-size: 50

@@ -74,10 +74,9 @@ A production-grade, horizontally scalable asynchronous job processing pipeline b
 
 5. **Strict Per-Attempt Timeout & Non-Blocking Jittered Exponential Retry**:
    - Every attempt runs on a bounded worker executor via `Future.get(timeoutMs, MILLISECONDS)`. On `TimeoutException`, `future.cancel(true)` interrupts the handler thread and treats the attempt as a retryable `JobAttemptTimeoutException`.
-   - **Never sleeps on Kafka listener threads**: retryable failures compute `nextRetryAt` using capped exponential backoff with proportional random jitter:
-     $$\text{cappedBase} = \min(\text{baseIntervalMs} \times \text{multiplier}^{\text{retry}-1}, \text{maxIntervalMs})$$
-     $$\text{delay} \sim \text{Uniform}\big([\text{cappedBase} \times (1 - \text{jitterFactor}),\ \text{cappedBase}]\big)$$
-     and persist a deferred `JOB_DISPATCH` outbox row with `available_at = nextRetryAt`.
+   - **Never sleeps on Kafka listener threads**: the retry policy is hardcoded in `RetryPolicy` (not configurable): **3 retries** (4 attempts total, overridable per job via `maxRetries`), base `1000 ms`, multiplier **`1.01`**, cap `60 s`, jitter `0.3`:
+     $$\text{cappedBase} = \min(1000 \times 1.01^{\text{retry}-1},\ 60000)\ \text{ms} \qquad \text{delay} \sim \text{Uniform}\big([0.7 \times \text{cappedBase},\ \text{cappedBase}]\big)$$
+     i.e. retry waits of roughly 0.7-1.0s, 0.71-1.01s and 0.71-1.02s. The delay is persisted as a deferred `JOB_DISPATCH` outbox row with `available_at = nextRetryAt`, so retries survive restarts.
 
 ---
 
@@ -131,6 +130,20 @@ Note on `maxRetries`: `attemptCount` is 1-based. `maxRetries: N` allows **1 init
 | Completion | Result/failure writes are fenced by `leaseToken`, so a zombie worker cannot overwrite a recovered attempt. |
 | DLQ | Dead-letter records are unique per outbox event id; redelivery is a no-op. |
 
+## Delivery Guarantees
+
+**At-least-once execution is guaranteed for every accepted job (`202`); exactly-once is not.** Handlers must be idempotent.
+
+| Hop | Why nothing is lost | Where duplicates can appear |
+| --- | --- | --- |
+| API -> DB/outbox | Job row and outbox row are written in one transaction; a `202` means both are durable. | Client retries are collapsed by `idempotencyKey`. |
+| Outbox -> Kafka | The relay marks a row published only after the broker acks; a crash in between re-publishes it. | Re-publish after a crash. Stale copies fail the conditional claim and are ignored. |
+| Kafka -> worker | The offset is committed only after the claim attempt. Infrastructure errors (e.g. DB down while claiming) are retried in place indefinitely, never skipped. | Redelivery after a rebalance. Ignored by the claim. |
+| Worker crash / hang | The lease expires and `StaleJobRecoveryScheduler` re-queues the job. | **The handler may run twice** if the first run did its side effects but crashed before recording the result, or if a zombie worker outlives its lease (its result is fenced out, its side effects are not). |
+| Retries exhausted | The job moves to `DEAD_LETTERED` (or `FAILED`), never silently dropped. | DLQ records are unique per event id. |
+
+So the *state transition* is effectively exactly-once (claim and completion are fenced by CAS and `leaseToken`), while *handler side effects* are at-least-once. Make handlers idempotent, e.g. key external writes on `jobId`.
+
 ## Operational Controls (`/api/v1/ops`)
 
 These endpoints are unauthenticated; expose them only on an internal network or behind your gateway.
@@ -157,14 +170,9 @@ curl -s -X POST "localhost:8080/api/v1/ops/queue/drain?priority=LOW"
 
 | Property | Default | Description |
 | --- | --- | --- |
-| `app.jobs.defaults.max-retries` | `3` | Default `maxRetries` when omitted on submission |
 | `app.jobs.defaults.timeout-ms` | `10000` | Default per-attempt execution timeout (`ms`) |
 | `app.jobs.topics.high` / `normal` / `low` / `dlq` | `jobs.high`, `jobs.normal`, `jobs.low`, `jobs.dlq` | Kafka topic names |
 | `app.jobs.consumer.high-concurrency` / `normal-concurrency` / `low-concurrency` | `4` / `2` / `1` | Listener concurrency per priority tier |
-| `app.jobs.retry.base-interval-ms` | `1000` | Initial backoff delay before retry #1 |
-| `app.jobs.retry.multiplier` | `2.0` | Exponential growth factor per retry |
-| `app.jobs.retry.max-interval-ms` | `60000` | Upper bound on retry delay |
-| `app.jobs.retry.jitter-factor` | `0.3` | Random jitter factor in `[0.0, 1.0]` |
 | `app.jobs.outbox.poll-interval-ms` | `200` | Outbox relay polling interval |
 | `app.jobs.outbox.batch-size` | `50` | Outbox claim batch size per replica |
 | `app.jobs.worker.lease-grace-ms` | `5000` | Extra lease buffer beyond `timeoutMs` |

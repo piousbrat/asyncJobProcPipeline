@@ -46,6 +46,20 @@ class JitteredExponentialBackoffCalculatorTest {
     }
 
     @Test
+    void fixedPolicyRetriesThreeTimesWithJitteredDelaysGrowingBy1Point01() {
+        assertThat(RetryPolicy.MAX_RETRIES).isEqualTo(3);
+        JitteredExponentialBackoffCalculator calculator = new JitteredExponentialBackoffCalculator();
+
+        for (int retry = 1; retry <= RetryPolicy.MAX_RETRIES; retry++) {
+            long base = Math.round(1000 * Math.pow(1.01, retry - 1));
+            assertThat(calculator.computeCappedBaseMs(retry)).isEqualTo(base);
+            for (int i = 0; i < 50; i++) {
+                assertThat(calculator.computeDelayMs(retry)).isBetween(Math.round(base * 0.7), base);
+            }
+        }
+    }
+
+    @Test
     void rejectsInvalidConfigurationAndRetryNumbers() {
         assertThatThrownBy(() -> new JitteredExponentialBackoffCalculator(0L, 2.0, 1000L, 0.2, () -> 0.5))
                 .isInstanceOf(IllegalArgumentException.class);

@@ -30,6 +30,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpMethod;
@@ -109,7 +110,7 @@ class WorkerFailureIntegrationTest {
     @Autowired
     private TestRestTemplate restTemplate;
 
-    @Autowired
+    @MockitoSpyBean
     private WorkerStateTxService workerStateTxService;
 
     @Autowired
@@ -133,6 +134,9 @@ class WorkerFailureIntegrationTest {
         scenarios.put("retries exhausted", new Scenario(
                 job("echo", Map.of("message", "m", "simulateAlwaysFail", true), 2, 2000),
                 JobStatus.DEAD_LETTERED, 3, "SimulatedTransientFailureException", AttemptStatus.FAILED));
+        scenarios.put("default policy retries 3 times", new Scenario(
+                withoutMaxRetries(job("echo", Map.of("message", "m", "simulateAlwaysFail", true), 0, 2000)),
+                JobStatus.DEAD_LETTERED, 4, "SimulatedTransientFailureException", AttemptStatus.FAILED));
         scenarios.put("maxRetries=0 fails once", new Scenario(
                 job("echo", Map.of("message", "m", "simulateFailures", 1), 0, 2000),
                 JobStatus.DEAD_LETTERED, 1, "SimulatedTransientFailureException", AttemptStatus.FAILED));
@@ -260,6 +264,28 @@ class WorkerFailureIntegrationTest {
         assertThat(FailureHandlers.RUNS.get(tag).get()).isEqualTo(1);
     }
 
+    @Test
+    void dispatchIsNotLostWhenTheDatabaseFailsWhileClaiming() {
+        // More consecutive claim failures than a bounded in-container retry would tolerate.
+        org.mockito.Mockito.doThrow(new IllegalStateException("db down"))
+                .doThrow(new IllegalStateException("db down"))
+                .doThrow(new IllegalStateException("db down"))
+                .doCallRealMethod()
+                .when(workerStateTxService).tryClaimAttempt(org.mockito.ArgumentMatchers.any());
+        try {
+            String jobId = post(job("echo", Map.of("message", "survives-db-outage"), 3, 2000)).getBody().jobId();
+
+            await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                JobStatusResponse status = getJob(jobId);
+                assertThat(status.state()).isEqualTo(JobStatus.SUCCEEDED);
+                assertThat(status.attemptCount()).isEqualTo(1);
+                assertThat(status.result().get("echo").asText()).isEqualTo("survives-db-outage");
+            });
+        } finally {
+            org.mockito.Mockito.reset(workerStateTxService);
+        }
+    }
+
     private ClaimedJobAttempt claimAsDeadWorker(String jobId) {
         return workerStateTxService.tryClaimAttempt(
                 new JobDispatchEnvelope(jobId, "echo", JobPriority.NORMAL, 1, 0, Instant.now())).orElseThrow();
@@ -272,6 +298,12 @@ class WorkerFailureIntegrationTest {
         request.put("maxRetries", maxRetries);
         request.put("timeoutMs", timeoutMs);
         return request;
+    }
+
+    private Map<String, Object> withoutMaxRetries(Map<String, Object> request) {
+        Map<String, Object> copy = new LinkedHashMap<>(request);
+        copy.remove("maxRetries");
+        return copy;
     }
 
     private Map<String, Object> delayed(Map<String, Object> request) {

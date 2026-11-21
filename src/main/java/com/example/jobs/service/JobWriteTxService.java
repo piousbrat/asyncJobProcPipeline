@@ -1,5 +1,6 @@
 package com.example.jobs.service;
 
+import com.example.jobs.backoff.RetryPolicy;
 import com.example.jobs.config.JobPipelineProperties;
 import com.example.jobs.domain.JobEntity;
 import com.example.jobs.domain.JobPriority;
@@ -54,7 +55,7 @@ public class JobWriteTxService {
         job.setStatus(JobStatus.QUEUED);
         job.setPayloadJson(writeJson(request.payload()));
         job.setMetadataJson(request.metadata() != null ? writeJson(request.metadata()) : null);
-        job.setMaxRetries(request.maxRetries() != null ? request.maxRetries() : properties.defaults().maxRetries());
+        job.setMaxRetries(request.maxRetries() != null ? request.maxRetries() : RetryPolicy.MAX_RETRIES);
         job.setTimeoutMs(request.timeoutMs() != null ? request.timeoutMs() : properties.defaults().timeoutMs());
         job.setRouteToDlq(request.routeToDlq() == null || request.routeToDlq());
         job.setSubmittedAt(now);
