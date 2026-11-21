@@ -22,6 +22,7 @@ import com.example.jobs.repository.OutboxEventRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.time.Duration;
@@ -56,6 +57,7 @@ public class WorkerStateTxService {
     private final OutboxEvents outboxEvents;
     private final OutboxRelayScheduler outboxRelayScheduler;
     private final JobPipelineProperties properties;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper;
 
     public WorkerStateTxService(
@@ -67,6 +69,7 @@ public class WorkerStateTxService {
             OutboxEvents outboxEvents,
             OutboxRelayScheduler outboxRelayScheduler,
             JobPipelineProperties properties,
+            MeterRegistry meterRegistry,
             ObjectMapper objectMapper) {
         this.jobRepository = jobRepository;
         this.jobAttemptRepository = jobAttemptRepository;
@@ -76,6 +79,7 @@ public class WorkerStateTxService {
         this.outboxEvents = outboxEvents;
         this.outboxRelayScheduler = outboxRelayScheduler;
         this.properties = properties;
+        this.meterRegistry = meterRegistry;
         this.objectMapper = objectMapper;
     }
 
@@ -89,6 +93,7 @@ public class WorkerStateTxService {
         Optional<JobEntity> peek = jobRepository.findById(envelope.jobId());
         if (peek.isEmpty()) {
             log.warn("Received dispatch for unknown jobId={}", envelope.jobId());
+            countSkippedDispatch("unknown_job");
             return Optional.empty();
         }
 
@@ -98,6 +103,7 @@ public class WorkerStateTxService {
                 || existing.getReplayCount() != envelope.replayGeneration()) {
             log.debug("Skipping duplicate/stale dispatch for jobId={} (status={}, attemptCount={}, expectedAttempt={})",
                     envelope.jobId(), existing.getStatus(), existing.getAttemptCount(), envelope.expectedAttempt());
+            countSkippedDispatch("stale");
             return Optional.empty();
         }
 
@@ -119,6 +125,7 @@ public class WorkerStateTxService {
 
         if (updated == 0) {
             log.debug("Lost race to claim jobId={} expectedAttempt={}", envelope.jobId(), envelope.expectedAttempt());
+            countSkippedDispatch("lost_race");
             return Optional.empty();
         }
 
@@ -150,6 +157,7 @@ public class WorkerStateTxService {
         if (job == null || job.getStatus() != JobStatus.RUNNING || !claimed.leaseToken().equals(job.getLeaseToken())) {
             log.warn("Fenced stale completion for jobId={} leaseToken={}",
                     claimed.job().getId(), claimed.leaseToken());
+            recordFencedResult(claimed, "SUCCEEDED");
             return false;
         }
 
@@ -185,6 +193,7 @@ public class WorkerStateTxService {
         if (job == null || job.getStatus() != JobStatus.RUNNING || !claimed.leaseToken().equals(job.getLeaseToken())) {
             log.warn("Fenced stale failure transition for jobId={} leaseToken={}",
                     claimed.job().getId(), claimed.leaseToken());
+            recordFencedResult(claimed, "FAILED");
             return;
         }
 
@@ -238,6 +247,7 @@ public class WorkerStateTxService {
 
             log.warn("Recovering expired RUNNING lease on job {} (attemptCount={}, maxRetries={})",
                     job.getId(), job.getAttemptCount(), job.getMaxRetries());
+            meterRegistry.counter("jobs.lease.recovered").increment();
 
             applyFailureOutcome(
                     job,
@@ -344,6 +354,20 @@ public class WorkerStateTxService {
         registerPostCommitFlush();
         log.error("Job {} queued for DLQ (reason={}, attempts={}, maxRetries={}, error={}: {})",
                 job.getId(), failureReason, job.getAttemptCount(), job.getMaxRetries(), errorType, errorMessage);
+    }
+
+    private void countSkippedDispatch(String reason) {
+        meterRegistry.counter("jobs.dispatch.duplicates_skipped", "reason", reason).increment();
+    }
+
+    /** A fenced result proves the handler ran after losing its lease, possibly overlapping a later attempt. */
+    private void recordFencedResult(ClaimedJobAttempt claimed, String outcome) {
+        meterRegistry.counter("jobs.execution.fenced", "outcome", outcome).increment();
+        jobAttemptRepository.findById(claimed.attemptEntityId()).ifPresent(attempt -> {
+            String note = "late " + outcome + " result discarded: worker had lost its lease (possible duplicate execution)";
+            attempt.setErrorMessage(attempt.getErrorMessage() == null ? note : attempt.getErrorMessage() + " | " + note);
+            jobAttemptRepository.save(attempt);
+        });
     }
 
     private void registerPostCommitFlush() {

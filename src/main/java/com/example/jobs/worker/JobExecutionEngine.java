@@ -11,6 +11,7 @@ import com.example.jobs.messaging.JobDispatchEnvelope;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
@@ -44,6 +46,7 @@ public class JobExecutionEngine {
     private final ExecutorService jobAttemptExecutor;
     private final ScheduledExecutorService leaseHeartbeatScheduler;
     private final JobPipelineProperties properties;
+    private final MeterRegistry meterRegistry;
     private final ObjectMapper objectMapper;
 
     public JobExecutionEngine(
@@ -51,12 +54,14 @@ public class JobExecutionEngine {
             List<JobHandler> handlers,
             ExecutorService jobAttemptExecutor,
             JobPipelineProperties properties,
+            MeterRegistry meterRegistry,
             ObjectMapper objectMapper) {
         this.workerStateTxService = workerStateTxService;
         this.handlerRegistry = handlers.stream()
                 .collect(Collectors.toMap(JobHandler::jobType, Function.identity()));
         this.jobAttemptExecutor = jobAttemptExecutor;
         this.properties = properties;
+        this.meterRegistry = meterRegistry;
         this.objectMapper = objectMapper;
         this.leaseHeartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "job-lease-heartbeat");
@@ -88,12 +93,23 @@ public class JobExecutionEngine {
                 TimeUnit.MILLISECONDS);
 
         Future<JsonNode> attemptFuture = null;
+        AtomicBoolean abandoned = new AtomicBoolean(false);
         try {
             JobExecutionContext context = buildContext(job);
-            attemptFuture = jobAttemptExecutor.submit(() -> executeAttempt(context));
+            attemptFuture = jobAttemptExecutor.submit(() -> {
+                JsonNode result = executeAttempt(context);
+                if (abandoned.get()) {
+                    // The handler ignored interruption and finished its work after the retry was already scheduled.
+                    meterRegistry.counter("jobs.execution.completed_after_timeout").increment();
+                    log.warn("Handler for job {} attempt {} completed after its {}ms timeout; its side effects may "
+                            + "duplicate the retry's", context.jobId(), context.attemptNumber(), timeoutMs);
+                }
+                return result;
+            });
             JsonNode result = attemptFuture.get(timeoutMs, TimeUnit.MILLISECONDS);
             workerStateTxService.completeSuccess(claimed, result);
         } catch (TimeoutException timeoutEx) {
+            abandoned.set(true);
             if (attemptFuture != null) {
                 attemptFuture.cancel(true);
             }

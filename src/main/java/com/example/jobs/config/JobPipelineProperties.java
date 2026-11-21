@@ -73,7 +73,8 @@ public record JobPipelineProperties(
     public record Idempotency(
             @DefaultValue("86400000") @Min(1000) long ttlMs,
             @DefaultValue("30000") @Min(100) long pendingTtlMs,
-            @DefaultValue("2000") @Min(0) long awaitMs) {
+            @DefaultValue("2000") @Min(0) long awaitMs,
+            @DefaultValue("600000") @Min(0) long fingerprintWindowMs) {
     }
 
     public record RateLimit(

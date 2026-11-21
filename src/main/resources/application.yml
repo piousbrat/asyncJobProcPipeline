@@ -88,6 +88,7 @@ app:
       ttl-ms: 86400000
       pending-ttl-ms: 30000
       await-ms: 2000
+      fingerprint-window-ms: 600000
     rate-limit:
       enabled: true
       limit: 10
